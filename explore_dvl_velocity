@@ -1,0 +1,422 @@
+# %%
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('TkAgg') 
+from scipy.signal import find_peaks
+#from sklearn.cluster import KMeans
+
+import pandas as pd
+import scipy 
+# %%
+# Velocity in each trajectory: x,y,z 
+peak_vel = []
+for trajectory in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    print(data.columns)
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+    speed_xy = np.sqrt(v_x**2 + v_y**2)
+    fig, axs = plt.subplots(4,1, figsize = (10,8), sharex = True)
+    
+    axs[0].plot(time, v_x, color = 'forestgreen')
+    axs[0].set_ylabel("v_x (m/s)")
+    axs[0].grid()
+
+    axs[1].plot(time, v_y, color = 'cornflowerblue')
+    axs[1].set_ylabel("v_y (m/s)")
+    axs[1].grid()
+
+    axs[2].plot(time, v_z, color ='darkorange')
+    axs[2].set_ylabel("v_z (m/s)")
+    axs[2].grid()
+
+    axs[3].plot(time, speed_xy, color ='mediumpurple')
+    axs[3].set_ylabel("speed_xy")
+    axs[3].set_xlabel("Time (s)")
+    axs[3].grid()
+
+    fig.suptitle(f'Trajectory {trajectory}')
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+# RMS amplitude per axis across all trajectories
+rms_vx, rms_vy, rms_vz = [], [], []
+for trajectory in range(1, 14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+    rms_vx.append(np.sqrt(np.mean(v_x**2)))
+    rms_vy.append(np.sqrt(np.mean(v_y**2)))
+    rms_vz.append(np.sqrt(np.mean(v_z**2)))
+
+trajs = np.arange(1, 14)
+x     = np.arange(len(trajs))
+width = 0.25
+
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.bar(x - width, rms_vx, width, label='v_x', color='forestgreen')
+ax.bar(x,         rms_vy, width, label='v_y', color='cornflowerblue')
+ax.bar(x + width, rms_vz, width, label='v_z', color='darkorange')
+
+ax.set_xticks(x)
+ax.set_xticklabels([f"Traj {t}" for t in trajs], rotation=45, ha='right')
+ax.set_ylabel("RMS amplitude (m/s)")
+ax.set_title("RMS Velocity Amplitude per Axis — All Trajectories")
+ax.legend()
+ax.grid(True, axis='y', alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+# %%
+# Second derivative of velocity (jerk) per trajectory
+for trajectory in range(1, 14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    time = data.iloc[:,0].values
+    v_x  = data.iloc[:,1].values
+    v_y  = data.iloc[:,2].values
+    v_z  = data.iloc[:,3].values
+
+    # second derivative using np.gradient twice (preserves signal length)
+    d2vx = np.gradient(np.gradient(v_x, time), time)
+    d2vy = np.gradient(np.gradient(v_y, time), time)
+    d2vz = np.gradient(np.gradient(v_z, time), time)
+
+    fig, axs = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+
+    axs[0].plot(time, d2vx, color='forestgreen', linewidth=0.8)
+    axs[0].set_ylabel("d²v_x/dt²")
+    axs[0].grid()
+
+    axs[1].plot(time, d2vy, color='cornflowerblue', linewidth=0.8)
+    axs[1].set_ylabel("d²v_y/dt²")
+    axs[1].grid()
+
+    axs[2].plot(time, d2vz, color='darkorange', linewidth=0.8)
+    axs[2].set_ylabel("d²v_z/dt²")
+    axs[2].set_xlabel("Time (s)")
+    axs[2].grid()
+
+    fig.suptitle(f"Second Derivative of Velocity — Trajectory {trajectory}")
+    plt.tight_layout()
+    plt.show()
+
+# %%
+# 1D curvature map of velocity signals via UnivariateSpline
+# κ(t) = |d²v/dt²| / (1 + (dv/dt)²)^(3/2)
+from scipy.interpolate import UnivariateSpline
+
+smoothing_factor = 0.5   # adjust: smaller = tighter fit
+peak_height      = 0.1   # minimum combined curvature to count as a maneuver
+peak_distance    = 10    # minimum samples between peaks
+
+for trajectory in range(1, 14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    time = data.iloc[:,0].values
+    v_x  = data.iloc[:,1].values
+    v_y  = data.iloc[:,2].values
+    v_z  = data.iloc[:,3].values
+
+    curvatures = {}
+    d2_store   = {}
+    for label, signal in [("v_x", v_x), ("v_y", v_y), ("v_z", v_z)]:
+        spl  = UnivariateSpline(time, signal, s=smoothing_factor)
+        d1   = spl.derivative(n=1)(time)
+        d2   = spl.derivative(n=2)(time)
+        # curvatures[label] = np.abs(d2) / (1 + d1**2)**1.5
+        curvatures[label] = d2 / (1 + d1**2)**1.5
+        d2_store[label]   = d2
+
+    # combined curvature magnitude across all axes
+    # combined_curvature   = np.sqrt(d2_store["v_x"]**2 + d2_store["v_y"]**2 + d2_store["v_z"]**2)
+    # peaks, properties    = find_peaks(combined_curvature, height=peak_height, distance=peak_distance)
+    # n_maneuvers          = len(peaks)
+    # maneuver_positions   = time[peaks]
+    # maneuver_intensities = combined_curvature[peaks]
+
+    fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    colors = {"v_x": "forestgreen", "v_y": "cornflowerblue", "v_z": "darkorange"}
+
+    for ax, (label, kappa) in zip(axs, curvatures.items()):
+        ax.plot(time, kappa, color=colors[label], linewidth=0.8)
+        ax.set_ylabel(f"κ  {label}")
+        ax.grid()
+
+    # # combined curvature + detected peaks
+    # axs[3].plot(time, combined_curvature, color="mediumpurple", linewidth=0.9, label="combined κ")
+    # axs[3].scatter(maneuver_positions, maneuver_intensities,
+    #                color="red", zorder=5, s=25, label=f"peaks (n={n_maneuvers})")
+    # axs[3].set_ylabel("‖κ‖")
+    # axs[3].set_xlabel("Time (s)")
+    # axs[3].legend(fontsize=8, loc="upper right")
+    # axs[3].grid()
+
+    fig.suptitle(f"Curvature  — Trajectory {trajectory}")
+    plt.tight_layout()
+    plt.show()
+
+
+# %%
+# All trajectories curvature overlaid — one plot per axis
+all_curvatures = {label: [] for label in ["v_x", "v_y", "v_z"]}
+
+for trajectory in range(1, 14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    time = data.iloc[:,0].values
+    v_x  = data.iloc[:,1].values
+    v_y  = data.iloc[:,2].values
+    v_z  = data.iloc[:,3].values
+
+    for label, signal in [("v_x", v_x), ("v_y", v_y), ("v_z", v_z)]:
+        spl  = UnivariateSpline(time, signal, s=smoothing_factor)
+        d1   = spl.derivative(n=1)(time)
+        d2   = spl.derivative(n=2)(time)
+        kappa = (d2) / (1 + d1**2)**1.5
+        all_curvatures[label].append((time, kappa, trajectory))
+
+cmap = plt.get_cmap("tab20")
+
+for label in ["v_x", "v_y", "v_z"]:
+    fig, ax = plt.subplots(figsize=(12, 4))
+    for i, (time, kappa, traj) in enumerate(all_curvatures[label]):
+        ax.plot(time, kappa, color=cmap(i), linewidth=0.8, label=f"Traj {traj}")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("κ")
+    ax.set_title(f"Curvature — {label} — All Trajectories")
+    ax.legend(fontsize=7, ncol=4, loc="upper right")
+    ax.grid(True, alpha=0.4)
+    plt.tight_layout()
+    plt.show()
+
+# %%
+# STD etc: x,y,z
+peak_vel = []
+for trajectory in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    print(data.columns)
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+    speed_xy = np.sqrt(v_x**2 + v_y**2)
+    print('trajectrory', trajectory)
+    std_x = np.round(np.std(v_x),3)
+    print('std v_x', std_x)
+
+    std_y = np.round(np.std(v_y),3)
+    print('std v_y', std_y)
+
+    std_z = np.round(np.std(v_z),3)
+    print('std v_z', std_z)
+
+    window = 50
+
+    vx_series = pd.Series(v_x)
+    vy_series = pd.Series(v_y)
+    vz_series = pd.Series(v_z)
+    std_vx = vx_series.rolling(window=window).mean()
+    std_vy = vy_series.rolling(window=window).mean()
+    std_vz = vz_series.rolling(window=window).mean()
+ 
+    plt.figure()
+    plt.plot(std_vx, label = 'x')
+    plt.plot(std_vy, label = 'y')
+    plt.plot(std_vz, label = 'z')
+    plt.title(f"Sliding mean (window = 50), trajectory {trajectory}")
+    plt.xlabel("Sample index")
+    plt.ylabel("std(v_x)")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+# %%
+# speed
+peak_vel = []
+for trajectory in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    print(data.columns)
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+    speed_xyz = np.sqrt(v_x**2 + v_y**2 + v_z**2)
+    
+    print(speed_xyz)
+# %%
+################  Histogram of velociy ################ 
+
+def histogram(velocity, name):
+
+    plt.hist(velocity, bins=50)
+    plt.title(f"{name} distribution traj {trajectory}")
+    plt.xlabel("v_x [m/s]")
+    plt.ylabel("count")
+    plt.show()
+
+    counts, bins = np.histogram(velocity, bins=50)
+
+    peaks, _ = find_peaks(counts)
+
+    # sort peaks by height
+    top_peaks = peaks[np.argsort(counts[peaks])][-2:]
+
+    # convert bin index -> velocity
+    peak_velocities = (bins[top_peaks] + bins[top_peaks+1]) / 2
+    
+
+        
+    return peak_velocities
+
+peak_vel_x = []
+peak_vel_y = []
+peak_vel_z = []
+for trajectory in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    print(data.columns)
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+    
+
+    
+    peak_velocities_x = histogram(v_x, "v_x")
+    peak_vel_x.append(peak_velocities_x)
+
+    peak_velocities_y = histogram(v_y, "v_y")
+    peak_vel_y.append(peak_velocities_y)
+
+    peak_velocities_z = histogram(v_z, "v_z")
+    peak_vel_z.append(peak_velocities_z)
+
+
+# %%
+
+
+peaks_vel_x = pd.DataFrame(peak_vel_x)
+peaks_vel_y = pd.DataFrame(peak_vel_y)
+peaks_vel_z = pd.DataFrame(peak_vel_z)
+
+# concatenate columns
+peaks = pd.concat([peaks_vel_x, peaks_vel_y, peaks_vel_z], axis=1)
+
+# assign column names
+peaks.columns = ['v_x_1', 'v_x_2', 'v_y_1', 'v_y_2', 'v_z_1', 'v_z_2']
+peaks_sorted = peaks.sort_values(by = 'v_x_1')
+
+plt.figure()
+plt.plot(peaks)
+# number the rows
+peaks.index += 1
+peaks.index.name = 'traj'
+
+
+plt.figure()
+peaks_vel_x = np.array(peak_vel_x).reshape(-1)
+peaks_vel_sorted_x = np.sort(peaks_vel_x)
+plt.plot(peaks_vel_sorted_x, '.', color = 'red')
+
+peaks_vel_y = np.array(peak_vel_y).reshape(-1)
+peaks_vel_sorted_y = np.sort(peaks_vel_y)
+plt.plot(peaks_vel_sorted_y, '.', color = 'blue')
+
+peaks_vel_z = np.array(peak_vel_z).reshape(-1)
+peaks_vel_sorted_z = np.sort(peaks_vel_z)
+plt.plot(peaks_vel_sorted_z, '.', color = 'green')
+
+plt.grid()
+plt.title(" all velocities sorted by ")
+# kmeans = KMeans(n_clusters=3).fit(peaks)
+# print(np.sort(kmeans.cluster_centers_.flatten()))
+# %%
+mean_vx = []
+std_vx = []
+
+for vel in peaks_vel_x:   # list of v_x arrays for each trajectory
+    mean_vx.append(np.mean(vel))
+    std_vx.append(np.std(vel))
+plt.figure(figsize=(6,6))
+
+plt.scatter(mean_vx, std_vx, s=100)
+
+for i in range(len(mean_vx)):
+    plt.text(mean_vx[i], std_vx[i], str(i+1))
+
+plt.xlabel("Mean forward velocity (m/s)")
+plt.ylabel("Velocity std (m/s)")
+plt.title("Velocity regime map")
+plt.grid(True)
+
+plt.show()
+# %%
+################ estimated trajectory ################ 
+for trajectory in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory}/DVL_trajectory{trajectory}.csv")
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,1]
+    v_y = data.iloc[:,2]
+    v_z = data.iloc[:,3]
+
+    # compute dt
+    dt = np.diff(time, prepend=time[0])
+
+    # integrate velocity -> position
+    x = np.cumsum(v_x * dt)
+    y = np.cumsum(v_y * dt)
+    z = np.cumsum(v_z * dt)
+
+    # 3D plot
+    fig = plt.figure(figsize=(8,6))
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.plot(x, y, z, linewidth=1.5)
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title("Estimated 3D Trajectory from DVL Velocities")
+
+# %%
+################ GT trajectory ################ 
+for trajectory_GT in range (1,14):
+    data = pd.read_csv(f"/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data/Trajectory{trajectory_GT}/GT_trajectory{trajectory_GT}.csv")
+    print(data.columns)
+
+    time = data.iloc[:,0]
+    v_x = data.iloc[:,4]
+    v_y = data.iloc[:,5]
+    v_z = data.iloc[:,6]
+
+    # compute dt
+    dt = np.diff(time, prepend=time[0])
+
+    # integrate velocity -> position
+    x = np.cumsum(v_x * dt)
+    y = np.cumsum(v_y * dt)
+    z = np.cumsum(v_z * dt)
+
+    # 3D plot
+    fig = plt.figure(figsize=(8,6))
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.plot(x, y, z, linewidth=1.5)
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title("GT Trajectory")
+    fig.suptitle(f'{trajectory_GT}')
+  
+
+# %%
+import sys
+print(sys.executable)
+
+import sklearn
+print(sklearn.__version__)
+# %%
