@@ -1,0 +1,25 @@
+# Data
+DATA/
+*.npz
+*.npy
+*.csv
+
+# External repos
+A-KIT-main/
+BeamsNet-main/
+BeamsNet-main.zip
+AUV- Snapir/
+AUV- Snapir.zip
+guy_simulation/
+existing methods/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+import numpy as np.py
+
+# System
+.DS_Store
+.vscode/
