@@ -65,9 +65,16 @@ def generate(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, se
             if return_trajectory:
                 snapshots.append((i, sigmas[i].item(), x.squeeze(0).clone()))
 
+    result = x.squeeze(0)  # (3, N)
+
+    # rescale each axis to match the conditioning std
+    current_std = result.std(dim=1, keepdim=True).clamp(min=1e-8)  # (3, 1)
+    target_std  = std.squeeze(0).unsqueeze(1)                       # (3, 1)
+    result      = result / current_std * target_std
+
     if return_trajectory:
-        return x.squeeze(0), snapshots
-    return x.squeeze(0)
+        return result, snapshots
+    return result
 
 
 def make_hist(bin_indices, amplitudes, n_bins=N_BINS):
