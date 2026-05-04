@@ -20,7 +20,6 @@ from datetime import datetime
 
 DRIVE_ROOT   = "/content/drive/MyDrive/PhD/dvl paper"
 DATASET_PATH = f"{DRIVE_ROOT}/dvl_dataset.npz"
-MODEL_PATH   = f"{DRIVE_ROOT}/edm_model.pt"
 
 # ── Device ────────────────────────────────────────────────────────────────────
 
@@ -35,18 +34,18 @@ if device.type == "cuda":
 
 class DVLDataset(Dataset):
     def __init__(self, path):
-        data            = np.load(path)
-        self.signals    = torch.tensor(data["signals"],    dtype=torch.float32)  # (W, 3, N)
-        self.curvatures = torch.tensor(data["curvatures"], dtype=torch.float32)  # (W, 3, N)
-        self.means      = torch.tensor(data["means"],      dtype=torch.float32)  # (W, 3)
-        self.stds       = torch.tensor(data["stds"],       dtype=torch.float32)  # (W, 3)
-        self.kurtoses   = torch.tensor(data["kurtoses"],   dtype=torch.float32)  # (W, 3)
+        data              = np.load(path)
+        self.signals      = torch.tensor(data["signals"],     dtype=torch.float32)  # (W, 3, N)
+        self.spike_hists  = torch.tensor(data["spike_hists"], dtype=torch.float32)  # (W, 3, N_BINS)
+        self.means        = torch.tensor(data["means"],       dtype=torch.float32)  # (W, 3)
+        self.stds         = torch.tensor(data["stds"],        dtype=torch.float32)  # (W, 3)
+        self.kurtoses     = torch.tensor(data["kurtoses"],    dtype=torch.float32)  # (W, 3)
 
     def __len__(self):
         return len(self.signals)
 
     def __getitem__(self, idx):
-        return self.signals[idx], self.curvatures[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
+        return self.signals[idx], self.spike_hists[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
 
 
 # ── EDM preconditioning constants ─────────────────────────────────────────────
@@ -54,6 +53,7 @@ class DVLDataset(Dataset):
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
 SIGMA_DATA = 1.0
+N_BINS     = 20   # bins in spike histogram conditioning
 
 
 def c_skip(sigma):
@@ -130,15 +130,17 @@ class UNet1D(nn.Module):
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
-    def forward(self, x, sigma, curvature, mean, std, kurtosis):
+    def forward(self, x, sigma, spike_hist, mean, std, kurtosis):
         B, _, L = x.shape
 
         x_scaled = c_in(sigma).view(B, 1, 1) * x
 
+        spike_interp = F.interpolate(spike_hist, size=L, mode='linear', align_corners=False)  # (B, 3, L)
+
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
         kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
-        inp = torch.cat([x_scaled, curvature, mean_exp, std_exp, kurt_exp], dim=1)
+        inp = torch.cat([x_scaled, spike_interp, mean_exp, std_exp, kurt_exp], dim=1)
 
         sigma_emb = self.sigma_emb(sigma)
 
@@ -162,10 +164,10 @@ class EDMModel(nn.Module):
         super().__init__()
         self.net = UNet1D()
 
-    def forward(self, x_noisy, sigma, curvature, mean, std, kurtosis):
+    def forward(self, x_noisy, sigma, spike_hist, mean, std, kurtosis):
         skip  = c_skip(sigma).view(-1, 1, 1) * x_noisy
         scale = c_out(sigma).view(-1, 1, 1)
-        net_out = self.net(x_noisy, sigma, curvature, mean, std, kurtosis)
+        net_out = self.net(x_noisy, sigma, spike_hist, mean, std, kurtosis)
         return skip + scale * net_out
 
 
@@ -187,8 +189,10 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
     print(f"Parameters: {n_params:,}")
     print(f"Batch size: {batch_size}  ({len(dataloader)} batches/epoch)\n")
 
-    run_time = datetime.now()
-    log_path = f"{DRIVE_ROOT}/training_log_{run_time.strftime('%Y%m%d_%H%M%S')}.txt"
+    run_time   = datetime.now()
+    timestamp  = run_time.strftime('%Y%m%d_%H%M%S')
+    log_path   = f"{DRIVE_ROOT}/training_log_{timestamp}.txt"
+    model_path = f"{DRIVE_ROOT}/edm_model_{timestamp}.pt"
     with open(log_path, "w") as f:
         f.write(f"Training run: {run_time.strftime('%Y-%m-%d  %H:%M:%S')}\n")
         f.write("=" * 50 + "\n\n")
@@ -200,7 +204,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  P_mean      = -1.2\n")
         f.write(f"  P_std       =  1.2\n\n")
         f.write("[Model architecture]\n")
-        f.write(f"  in_channels   = 15  (3 signal + 3 curvature + 3 mean + 3 std + 3 kurtosis)\n")
+        f.write(f"  in_channels   = 15  (3 signal + 3 spike_hist + 3 mean + 3 std + 3 kurtosis)\n")
         f.write(f"  out_channels  = 3\n")
         f.write(f"  base_channels = 64\n")
         f.write(f"  embed_dim     = 64\n")
@@ -217,19 +221,22 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
         f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
-        f.write(f"  conditions    = curvature, mean, std, kurtosis\n\n")
+        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n\n")
+        f.write(f"[Files]\n")
+        f.write(f"  model         = {model_path}\n")
+        f.write(f"  log           = {log_path}\n\n")
         f.write("[Loss curve]\n")
     print(f"Log: {log_path}\n")
 
     losses = []
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
-        for signals, curvatures, means, stds, kurtoses in dataloader:
-            signals    = signals.to(device)
-            curvatures = curvatures.to(device)
-            means      = means.to(device)
-            stds       = stds.to(device)
-            kurtoses   = kurtoses.to(device)
+        for signals, spike_hists, means, stds, kurtoses in dataloader:
+            signals     = signals.to(device)
+            spike_hists = spike_hists.to(device)
+            means       = means.to(device)
+            stds        = stds.to(device)
+            kurtoses    = kurtoses.to(device)
             B = len(signals)
 
             sigma   = sample_sigma(B, device)
@@ -240,7 +247,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
             co     = c_out(sigma).view(B, 1, 1)
             target = (signals - cs * z) / co
 
-            x_hat = model(z, sigma, curvatures, means, stds, kurtoses)
+            x_hat = model(z, sigma, spike_hists, means, stds, kurtoses)
 
             w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()
@@ -261,10 +268,10 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
                 f.write(f"  epoch {epoch:>6} / {epochs}  loss = {avg_loss:.6f}\n")
 
         if epoch % 500 == 0:
-            torch.save(model.state_dict(), MODEL_PATH)
+            torch.save(model.state_dict(), model_path)
 
-    torch.save(model.state_dict(), MODEL_PATH)
-    print(f"Model saved to {MODEL_PATH}")
+    torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
     end_time = datetime.now()
     with open(log_path, "a") as f:
