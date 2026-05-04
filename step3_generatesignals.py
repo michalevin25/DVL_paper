@@ -13,18 +13,18 @@ DATASET_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset.npz"
 
 class DVLDataset(Dataset):
     def __init__(self, path):
-        data            = np.load(path)
-        self.signals    = torch.tensor(data["signals"],    dtype=torch.float32)  # (W, 3, N)
-        self.curvatures = torch.tensor(data["curvatures"], dtype=torch.float32)  # (W, 3, N)
-        self.means      = torch.tensor(data["means"],      dtype=torch.float32)  # (W, 3)
-        self.stds       = torch.tensor(data["stds"],       dtype=torch.float32)  # (W, 3)
-        self.kurtoses   = torch.tensor(data["kurtoses"],   dtype=torch.float32)  # (W, 3)
+        data              = np.load(path)
+        self.signals      = torch.tensor(data["signals"],     dtype=torch.float32)  # (W, 3, N)
+        self.spike_hists  = torch.tensor(data["spike_hists"], dtype=torch.float32)  # (W, 3, N_BINS)
+        self.means        = torch.tensor(data["means"],       dtype=torch.float32)  # (W, 3)
+        self.stds         = torch.tensor(data["stds"],        dtype=torch.float32)  # (W, 3)
+        self.kurtoses     = torch.tensor(data["kurtoses"],    dtype=torch.float32)  # (W, 3)
 
     def __len__(self):
         return len(self.signals)
 
     def __getitem__(self, idx):
-        return self.signals[idx], self.curvatures[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
+        return self.signals[idx], self.spike_hists[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
 
 
 # ── EDM preconditioning constants ─────────────────────────────────────────────
@@ -32,6 +32,7 @@ class DVLDataset(Dataset):
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
 SIGMA_DATA = 1.0  # signals are normalized to unit variance per window
+N_BINS     = 20   # bins in spike histogram conditioning
 
 
 def c_skip(sigma):
@@ -121,24 +122,27 @@ class UNet1D(nn.Module):
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
-    def forward(self, x, sigma, curvature, mean, std, kurtosis):
-        # x:         (B, 3, L)
-        # sigma:     (B,)
-        # curvature: (B, 3, L)
-        # mean:      (B, 3)
-        # std:       (B, 3)
-        # kurtosis:  (B, 3)
+    def forward(self, x, sigma, spike_hist, mean, std, kurtosis):
+        # x:          (B, 3, L)
+        # sigma:      (B,)
+        # spike_hist: (B, 3, N_BINS) — coarse maneuver timing histogram
+        # mean:       (B, 3)
+        # std:        (B, 3)
+        # kurtosis:   (B, 3)
 
         B, _, L = x.shape
 
         # apply cin preconditioning to noisy signal only — conditions are clean and must not be suppressed
         x_scaled = c_in(sigma).view(B, 1, 1) * x
 
+        # upsample spike histogram to signal length
+        spike_interp = F.interpolate(spike_hist, size=L, mode='linear', align_corners=False)  # (B, 3, L)
+
         # expand scalar conditions to (B, 3, L) and concatenate all
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
         kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
-        inp = torch.cat([x_scaled, curvature, mean_exp, std_exp, kurt_exp], dim=1)  # (B, 15, L)
+        inp = torch.cat([x_scaled, spike_interp, mean_exp, std_exp, kurt_exp], dim=1)  # (B, 15, L)
 
         sigma_emb = self.sigma_emb(sigma)  # (B, 64)
 
@@ -165,14 +169,14 @@ class EDMModel(nn.Module):
         super().__init__()
         self.net = UNet1D()
 
-    def forward(self, x_noisy, sigma, curvature, mean, std, kurtosis):
+    def forward(self, x_noisy, sigma, spike_hist, mean, std, kurtosis):
         # x_noisy: (B, 3, L) — z = x0 + ε
         # returns x̂: (B, 3, L) — denoised estimate of x0
 
         skip  = c_skip(sigma).view(-1, 1, 1) * x_noisy
         scale = c_out(sigma).view(-1, 1, 1)
 
-        net_out = self.net(x_noisy, sigma, curvature, mean, std, kurtosis)
+        net_out = self.net(x_noisy, sigma, spike_hist, mean, std, kurtosis)
 
         return skip + scale * net_out  # x̂ = cskip·z + cout·Gϕ(cin·z, cnoise, c)
 
@@ -209,7 +213,7 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
         f.write(f"  P_mean      = -1.2\n")
         f.write(f"  P_std       =  1.2\n\n")
         f.write("[Model architecture]\n")
-        f.write(f"  in_channels   = 15  (3 signal + 3 curvature + 3 mean + 3 std + 3 kurtosis)\n")
+        f.write(f"  in_channels   = 15  (3 signal + 3 spike_hist + 3 mean + 3 std + 3 kurtosis)\n")
         f.write(f"  out_channels  = 3\n")
         f.write(f"  base_channels = 64\n")
         f.write(f"  embed_dim     = 64\n")
@@ -225,7 +229,7 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
         f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
-        f.write(f"  conditions    = curvature, mean, std, kurtosis\n")
+        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n")
     print(f"Training config saved to {log_path}\n")
 
     with open(log_path, "a") as f:
@@ -234,21 +238,21 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
     losses = []
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
-        for signals, curvatures, means, stds, kurtoses in dataloader:
+        for signals, spike_hists, means, stds, kurtoses in dataloader:
             B = len(signals)
 
             # sample σ and noise
-            sigma   = sample_sigma(B)                                       # (B,)
+            sigma   = sample_sigma(B)                                           # (B,)
             epsilon = torch.randn_like(signals) * sigma.view(B, 1, 1)
-            z       = signals + epsilon                                     # z = x + ε
+            z       = signals + epsilon                                         # z = x + ε
 
             # compute target: (x0 - cskip·z) / cout
             cs  = c_skip(sigma).view(B, 1, 1)
             co  = c_out(sigma).view(B, 1, 1)
-            target = (signals - cs * z) / co                               # (B, 3, L)
+            target = (signals - cs * z) / co                                   # (B, 3, L)
 
             # forward pass
-            x_hat = model(z, sigma, curvatures, means, stds, kurtoses)    # (B, 3, L)
+            x_hat = model(z, sigma, spike_hists, means, stds, kurtoses)       # (B, 3, L)
 
             # weighted loss — clamp weight to prevent extreme values at small σ
             w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
@@ -295,12 +299,12 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
     print(f"Dataset size: {len(dataset)} trajectories")
 
-    signals, curvatures, means, stds, kurtoses = next(iter(dataloader))
-    print(f"signals:    {signals.shape}")
-    print(f"curvatures: {curvatures.shape}")
-    print(f"means:      {means.shape}")
-    print(f"stds:       {stds.shape}")
-    print(f"kurtoses:   {kurtoses.shape}")
+    signals, spike_hists, means, stds, kurtoses = next(iter(dataloader))
+    print(f"signals:     {signals.shape}")
+    print(f"spike_hists: {spike_hists.shape}")
+    print(f"means:       {means.shape}")
+    print(f"stds:        {stds.shape}")
+    print(f"kurtoses:    {kurtoses.shape}")
 
     model = EDMModel()
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -310,7 +314,7 @@ if __name__ == "__main__":
     epsilon = torch.randn_like(signals)
     z       = signals + sigma.view(-1, 1, 1) * epsilon   # EDM forward: z = x + ε
 
-    x_hat = model(z, sigma, curvatures, means, stds, kurtoses)
+    x_hat = model(z, sigma, spike_hists, means, stds, kurtoses)
     print(f"Input shape:  {z.shape}")
     print(f"Output shape: {x_hat.shape}")   # should be (4, 3, 400)
 
