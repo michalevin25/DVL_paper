@@ -1,13 +1,21 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import glob
+import os
 from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX, N_BINS
 
-MODEL_PATH   = "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt"
-DATASET_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset.npz"
+DATA_DIR     = "/Users/michal/Desktop/PhD/dvl paper/DATA"
+DATASET_PATH = f"{DATA_DIR}/dvl_dataset.npz"
 
 
-# ── Load trained model ────────────────────────────────────────────────────────
+# ── Load latest model by timestamp ───────────────────────────────────────────
+
+candidates = sorted(glob.glob(f"{DATA_DIR}/edm_model_*.pt"))
+if not candidates:
+    raise FileNotFoundError(f"No edm_model_*.pt found in {DATA_DIR}")
+MODEL_PATH = candidates[-1]  # lexicographic sort = chronological for YYYYMMDD_HHMMSS
+print(f"Loading model: {os.path.basename(MODEL_PATH)}")
 
 model = EDMModel()
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
