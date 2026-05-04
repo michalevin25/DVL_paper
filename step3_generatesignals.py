@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 DATASET_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset.npz"
 
@@ -11,24 +13,25 @@ DATASET_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset.npz"
 
 class DVLDataset(Dataset):
     def __init__(self, path):
-        data           = np.load(path)
-        self.signals    = torch.tensor(data["signals"],    dtype=torch.float32)  # (13, 3, N)
-        self.curvatures = torch.tensor(data["curvatures"], dtype=torch.float32)  # (13, 3, N)
-        self.means      = torch.tensor(data["means"],      dtype=torch.float32)  # (13, 3)
-        self.stds       = torch.tensor(data["stds"],       dtype=torch.float32)  # (13, 3)
+        data            = np.load(path)
+        self.signals    = torch.tensor(data["signals"],    dtype=torch.float32)  # (W, 3, N)
+        self.curvatures = torch.tensor(data["curvatures"], dtype=torch.float32)  # (W, 3, N)
+        self.means      = torch.tensor(data["means"],      dtype=torch.float32)  # (W, 3)
+        self.stds       = torch.tensor(data["stds"],       dtype=torch.float32)  # (W, 3)
+        self.kurtoses   = torch.tensor(data["kurtoses"],   dtype=torch.float32)  # (W, 3)
 
     def __len__(self):
         return len(self.signals)
 
     def __getitem__(self, idx):
-        return self.signals[idx], self.curvatures[idx], self.means[idx], self.stds[idx]
+        return self.signals[idx], self.curvatures[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
 
 
 # ── EDM preconditioning constants ─────────────────────────────────────────────
 
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
-SIGMA_DATA = 0.5
+SIGMA_DATA = 1.0  # signals are normalized to unit variance per window
 
 
 def c_skip(sigma):
@@ -91,10 +94,10 @@ class ResBlock1D(nn.Module):
 
 class UNet1D(nn.Module):
     """
-    Input channels: 3 (signal) + 3 (curvature) + 3 (mean) + 3 (std) = 12
+    Input channels: 3 (signal) + 3 (curvature) + 3 (mean) + 3 (std) + 3 (kurtosis) = 15
     Output channels: 3 (predicted x_0)
     """
-    def __init__(self, in_channels=12, out_channels=3, base_channels=64, embed_dim=64):
+    def __init__(self, in_channels=15, out_channels=3, base_channels=64, embed_dim=64):
         super().__init__()
         C = base_channels  # 64
 
@@ -110,8 +113,7 @@ class UNet1D(nn.Module):
         # bottleneck
         self.bottleneck = ResBlock1D(C*4, C*4, embed_dim)      # (B, 256, 50)
 
-        # decoder
-        self.up = nn.Upsample(scale_factor=2, mode='nearest')
+        # decoder — upsample to match skip connection size exactly
 
         self.dec3 = ResBlock1D(C*4 + C*4, C*4, embed_dim)     # (B, 256, 100)
         self.dec2 = ResBlock1D(C*4 + C*2, C*2, embed_dim)     # (B, 128, 200)
@@ -119,22 +121,24 @@ class UNet1D(nn.Module):
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
-    def forward(self, x, sigma, curvature, mean, std):
-        # x:         (B, 3, 400)
+    def forward(self, x, sigma, curvature, mean, std, kurtosis):
+        # x:         (B, 3, L)
         # sigma:     (B,)
-        # curvature: (B, 3, 400)
+        # curvature: (B, 3, L)
         # mean:      (B, 3)
         # std:       (B, 3)
+        # kurtosis:  (B, 3)
 
         B, _, L = x.shape
 
-        # expand mean and std to (B, 3, 400) and concatenate all conditions
+        # apply cin preconditioning to noisy signal only — conditions are clean and must not be suppressed
+        x_scaled = c_in(sigma).view(B, 1, 1) * x
+
+        # expand scalar conditions to (B, 3, L) and concatenate all
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
-        inp = torch.cat([x, curvature, mean_exp, std_exp], dim=1)  # (B, 12, 400)
-
-        # apply cin preconditioning
-        inp = c_in(sigma).view(B, 1, 1) * inp
+        kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
+        inp = torch.cat([x_scaled, curvature, mean_exp, std_exp, kurt_exp], dim=1)  # (B, 15, L)
 
         sigma_emb = self.sigma_emb(sigma)  # (B, 64)
 
@@ -146,10 +150,10 @@ class UNet1D(nn.Module):
         # bottleneck
         b = self.bottleneck(self.down(e3), sigma_emb)  # (B, 256, 50)
 
-        # decoder with skip connections
-        d3 = self.dec3(torch.cat([self.up(b),  e3], dim=1), sigma_emb)  # (B, 256, 100)
-        d2 = self.dec2(torch.cat([self.up(d3), e2], dim=1), sigma_emb)  # (B, 128, 200)
-        d1 = self.dec1(torch.cat([self.up(d2), e1], dim=1), sigma_emb)  # (B, 64,  400)
+        # decoder with skip connections — upsample to exact skip size to handle odd dimensions
+        d3 = self.dec3(torch.cat([F.interpolate(b,  size=e3.shape[-1], mode='nearest'), e3], dim=1), sigma_emb)
+        d2 = self.dec2(torch.cat([F.interpolate(d3, size=e2.shape[-1], mode='nearest'), e2], dim=1), sigma_emb)
+        d1 = self.dec1(torch.cat([F.interpolate(d2, size=e1.shape[-1], mode='nearest'), e1], dim=1), sigma_emb)
 
         return self.out_conv(d1)  # (B, 3, 400)
 
@@ -161,14 +165,14 @@ class EDMModel(nn.Module):
         super().__init__()
         self.net = UNet1D()
 
-    def forward(self, x_noisy, sigma, curvature, mean, std):
-        # x_noisy: (B, 3, 400) — z = x0 + ε
-        # returns x̂: (B, 3, 400) — denoised estimate of x0
+    def forward(self, x_noisy, sigma, curvature, mean, std, kurtosis):
+        # x_noisy: (B, 3, L) — z = x0 + ε
+        # returns x̂: (B, 3, L) — denoised estimate of x0
 
         skip  = c_skip(sigma).view(-1, 1, 1) * x_noisy
         scale = c_out(sigma).view(-1, 1, 1)
 
-        net_out = self.net(x_noisy, sigma, curvature, mean, std)
+        net_out = self.net(x_noisy, sigma, curvature, mean, std, kurtosis)
 
         return skip + scale * net_out  # x̂ = cskip·z + cout·Gϕ(cin·z, cnoise, c)
 
@@ -180,41 +184,79 @@ def sample_sigma(batch_size, P_mean=-1.2, P_std=1.2):
     log_sigma = torch.randn(batch_size) * P_std + P_mean
     return torch.exp(log_sigma)
 
-def train(epochs=10000, batch_size=4, lr=3e-5):
+def train(epochs=15000, batch_size=4, lr=3e-5):
     dataset    = DVLDataset(DATASET_PATH)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model     = EDMModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    n_params = sum(p.numel() for p in model.parameters())
     print(f"Training on {len(dataset)} trajectories for {epochs} epochs")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}\n")
+    print(f"Parameters: {n_params:,}\n")
+
+    # save training config to a timestamped log file
+    run_time  = datetime.now()
+    log_path  = f"/Users/michal/Desktop/PhD/dvl paper/DATA/training_log_{run_time.strftime('%Y%m%d_%H%M%S')}.txt"
+    with open(log_path, "w") as f:
+        f.write(f"Training run: {run_time.strftime('%Y-%m-%d  %H:%M:%S')}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write("[EDM constants]\n")
+        f.write(f"  SIGMA_MIN   = {SIGMA_MIN}\n")
+        f.write(f"  SIGMA_MAX   = {SIGMA_MAX}\n")
+        f.write(f"  SIGMA_DATA  = {SIGMA_DATA}\n\n")
+        f.write("[Noise schedule sampling]\n")
+        f.write(f"  P_mean      = -1.2\n")
+        f.write(f"  P_std       =  1.2\n\n")
+        f.write("[Model architecture]\n")
+        f.write(f"  in_channels   = 15  (3 signal + 3 curvature + 3 mean + 3 std + 3 kurtosis)\n")
+        f.write(f"  out_channels  = 3\n")
+        f.write(f"  base_channels = 64\n")
+        f.write(f"  embed_dim     = 64\n")
+        f.write(f"  total params  = {n_params:,}\n\n")
+        f.write("[Training]\n")
+        f.write(f"  epochs        = {epochs}\n")
+        f.write(f"  batch_size    = {batch_size}\n")
+        f.write(f"  lr            = {lr}\n")
+        f.write(f"  optimizer     = Adam\n")
+        f.write(f"  grad_clip     = 1.0  (clip_grad_norm)\n")
+        f.write(f"  loss_weight   = clamped at max 100\n\n")
+        f.write("[Dataset]\n")
+        f.write(f"  path          = {DATASET_PATH}\n")
+        f.write(f"  n_windows     = {len(dataset)}\n")
+        f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
+        f.write(f"  conditions    = curvature, mean, std, kurtosis\n")
+    print(f"Training config saved to {log_path}\n")
+
+    with open(log_path, "a") as f:
+        f.write("[Loss curve]\n")
 
     losses = []
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
-        for signals, curvatures, means, stds in dataloader:
+        for signals, curvatures, means, stds, kurtoses in dataloader:
             B = len(signals)
 
             # sample σ and noise
-            sigma   = sample_sigma(B)                          # (B,)
+            sigma   = sample_sigma(B)                                       # (B,)
             epsilon = torch.randn_like(signals) * sigma.view(B, 1, 1)
-            z       = signals + epsilon                        # z = x + ε
+            z       = signals + epsilon                                     # z = x + ε
 
             # compute target: (x0 - cskip·z) / cout
             cs  = c_skip(sigma).view(B, 1, 1)
             co  = c_out(sigma).view(B, 1, 1)
-            target = (signals - cs * z) / co                  # (B, 3, 400)
+            target = (signals - cs * z) / co                               # (B, 3, L)
 
             # forward pass
-            x_hat = model(z, sigma, curvatures, means, stds)  # (B, 3, 400)
+            x_hat = model(z, sigma, curvatures, means, stds, kurtoses)    # (B, 3, L)
 
-            # weighted loss
-            w    = loss_weight(sigma).view(B, 1, 1)
+            # weighted loss — clamp weight to prevent extreme values at small σ
+            w    = loss_weight(sigma).clamp(max=100.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -222,8 +264,22 @@ def train(epochs=10000, batch_size=4, lr=3e-5):
         avg_loss = epoch_loss / len(dataloader)
         losses.append(avg_loss)
 
-        if epoch % 500 == 0:
+        if epoch % 250 == 0:
             print(f"Epoch {epoch:>6} / {epochs} — loss: {avg_loss:.6f}")
+            with open(log_path, "a") as f:
+                f.write(f"  epoch {epoch:>6} / {epochs}  loss = {avg_loss:.6f}\n")
+
+    torch.save(model.state_dict(), "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt")
+    print("Model saved to DATA/edm_model.pt")
+
+    end_time = datetime.now()
+    with open(log_path, "a") as f:
+        f.write("[Results]\n")
+        f.write(f"  final loss    = {losses[-1]:.6f}\n")
+        f.write(f"  min loss      = {min(losses):.6f}  (epoch {losses.index(min(losses)) + 1})\n")
+        f.write(f"  training time = {str(end_time - run_time).split('.')[0]}\n")
+        f.write(f"  finished at   = {end_time.strftime('%Y-%m-%d  %H:%M:%S')}\n")
+    print(f"Results appended to {log_path}")
 
     return model, losses
 
@@ -235,11 +291,12 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
     print(f"Dataset size: {len(dataset)} trajectories")
 
-    signals, curvatures, means, stds = next(iter(dataloader))
+    signals, curvatures, means, stds, kurtoses = next(iter(dataloader))
     print(f"signals:    {signals.shape}")
     print(f"curvatures: {curvatures.shape}")
     print(f"means:      {means.shape}")
     print(f"stds:       {stds.shape}")
+    print(f"kurtoses:   {kurtoses.shape}")
 
     model = EDMModel()
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -249,12 +306,12 @@ if __name__ == "__main__":
     epsilon = torch.randn_like(signals)
     z       = signals + sigma.view(-1, 1, 1) * epsilon   # EDM forward: z = x + ε
 
-    x_hat = model(z, sigma, curvatures, means, stds)
+    x_hat = model(z, sigma, curvatures, means, stds, kurtoses)
     print(f"Input shape:  {z.shape}")
     print(f"Output shape: {x_hat.shape}")   # should be (4, 3, 400)
 
     # plot clean signal, noisy input, and untrained model output for first sample
-    import matplotlib.pyplot as plt
+
     labels = ["vx", "vy", "vz"]
     fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True)
     for i in range(3):

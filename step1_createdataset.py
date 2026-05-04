@@ -3,12 +3,15 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from scipy.interpolate import UnivariateSpline
+from scipy.stats import kurtosis as compute_kurtosis
 import matplotlib.pyplot as plt
 
-DATA_PATH = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
-SAVE_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset"
+DATA_PATH      = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
+SAVE_PATH      = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset"
 N_TRAJECTORIES = 13
-SMOOTHING = 0.5
+SMOOTHING      = 0.5
+WINDOW_SIZE    = 206
+STRIDE         = 50
 
 
 # ── 1. Load raw signals ────────────────────────────────────────────────────────
@@ -58,22 +61,50 @@ def normalize(signal_3axis, mean, std):
     return (signal_3axis - mean[:, None]) / std[:, None]
 
 
+# ── 5. Windowing ──────────────────────────────────────────────────────────────
+
+def create_windows(signals, curvatures):
+    win_signals    = []
+    win_curvatures = []
+    win_means      = []
+    win_stds       = []
+    win_kurtoses   = []
+    win_traj_ids   = []
+    for traj_idx, (sig, curv) in enumerate(zip(signals, curvatures)):
+        N = sig.shape[1]
+        for start in range(0, N - WINDOW_SIZE + 1, STRIDE):
+            end        = start + WINDOW_SIZE
+            w_sig      = sig[:, start:end]                         # (3, WINDOW_SIZE)
+            w_curv     = curv[:, start:end]                        # (3, WINDOW_SIZE)
+            w_mean     = w_sig.mean(axis=1)                        # (3,)
+            w_std      = w_sig.std(axis=1)                         # (3,)
+            w_kurt     = compute_kurtosis(w_sig, axis=1, fisher=True)  # excess kurtosis (3,)
+            win_signals.append(w_sig)
+            win_curvatures.append(w_curv)
+            win_means.append(w_mean)
+            win_stds.append(w_std)
+            win_kurtoses.append(w_kurt)
+            win_traj_ids.append(traj_idx + 1)                     # 1-indexed trajectory number
+    return win_signals, win_curvatures, win_means, win_stds, win_kurtoses, win_traj_ids
+
+
 # ── 4. PyTorch Dataset ─────────────────────────────────────────────────────────
 
 class DVLDataset(Dataset):
-    def __init__(self, signals, curvatures, means, stds):
-        self.samples = list(zip(signals, curvatures, means, stds))
+    def __init__(self, signals, curvatures, means, stds, kurtoses):
+        self.samples = list(zip(signals, curvatures, means, stds, kurtoses))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        signal, curvature, mean, std = self.samples[idx]
+        signal, curvature, mean, std, kurt = self.samples[idx]
         return (
             torch.tensor(signal,    dtype=torch.float32),  # (3, N)
             torch.tensor(curvature, dtype=torch.float32),  # (3, N)
             torch.tensor(mean,      dtype=torch.float32),  # (3,)
             torch.tensor(std,       dtype=torch.float32),  # (3,)
+            torch.tensor(kurt,      dtype=torch.float32),  # (3,)
         )
 
 
@@ -93,18 +124,24 @@ def build_pipeline(batch_size=4, save_path=None):
     print("Normalizing signals...")
     signals_norm = [normalize(s, m, sd) for s, m, sd in zip(signals, means, stds)]
 
+    print("Creating windows...")
+    win_signals, win_curvatures, win_means, win_stds, win_kurtoses, win_traj_ids = create_windows(signals_norm, curvatures)
+    print(f"  {len(win_signals)} windows (window={WINDOW_SIZE}, stride={STRIDE})")
+
     if save_path is not None:
         np.savez(
             save_path,
-            signals=np.stack(signals_norm),  # (13, 3, N) — normalized
-            curvatures=np.stack(curvatures), # (13, 3, N)
-            means=np.stack(means),           # (13, 3)
-            stds=np.stack(stds),             # (13, 3)
+            signals=np.stack(win_signals),           # (W, 3, WINDOW_SIZE)
+            curvatures=np.stack(win_curvatures),     # (W, 3, WINDOW_SIZE)
+            means=np.stack(win_means),               # (W, 3)
+            stds=np.stack(win_stds),                 # (W, 3)
+            kurtoses=np.stack(win_kurtoses),         # (W, 3) excess kurtosis per axis
+            traj_ids=np.array(win_traj_ids),         # (W,) trajectory number 1–13
         )
         print(f"  Saved dataset to {save_path}.npz")
 
-    dataset = DVLDataset(signals_norm, curvatures, means, stds)
-    print(f"  Dataset size: {len(dataset)} samples")
+    dataset = DVLDataset(win_signals, win_curvatures, win_means, win_stds, win_kurtoses)
+    print(f"  Dataset size: {len(dataset)} windows")
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
