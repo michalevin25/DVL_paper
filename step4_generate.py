@@ -300,9 +300,11 @@ for idx in range(len(signals)):
     si = stds[idx].unsqueeze(0)
     ki = kurtoses[idx].unsqueeze(0)
 
-    rm, rs, rk = window_stats(signals[idx])
-    gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
-    gm, gs, gk = window_stats(gen_i)
+    # denormalize the real signal (stored normalized) back to original scale
+    real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
+    rm, rs, rk  = window_stats(real_denorm)
+    gen_i       = generate(hi, mi, si, ki, signal_length=N, seed=42)
+    gm, gs, gk  = window_stats(gen_i)
 
     real_m.extend(rm);  real_s.extend(rs);  real_k.extend(rk)
     gen_m.extend(gm);   gen_s.extend(gs);   gen_k.extend(gk)
@@ -355,9 +357,10 @@ for idx in test_indices:
     ki = kurtoses[idx].unsqueeze(0)
     gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
 
+    real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
     for ax in range(3):
-        freqs, Pr = welch(signals[idx, ax].numpy(), nperseg=nperseg)
-        _,     Pg = welch(gen_i[ax].numpy(),        nperseg=nperseg)
+        freqs, Pr = welch(real_denorm[ax].numpy(), nperseg=nperseg)
+        _,     Pg = welch(gen_i[ax].numpy(),       nperseg=nperseg)
         real_psds.append(Pr)
         gen_psds.append(Pg)
 
