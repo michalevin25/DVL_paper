@@ -65,12 +65,12 @@ def generate(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, se
             if return_trajectory:
                 snapshots.append((i, sigmas[i].item(), x.squeeze(0).clone()))
 
-    result = x.squeeze(0)  # (3, N)
+    result = x.squeeze(0)  # (3, N) — zero mean, unit variance (window-normalized space)
 
-    # rescale each axis to match the conditioning std
-    current_std = result.std(dim=1, keepdim=True).clamp(min=1e-8)  # (3, 1)
-    target_std  = std.squeeze(0).unsqueeze(1)                       # (3, 1)
-    result      = result / current_std * target_std
+    # denormalize: reverse the window-level normalization applied in step1
+    target_std  = std.squeeze(0).unsqueeze(1)   # (3, 1)
+    target_mean = mean.squeeze(0).unsqueeze(1)  # (3, 1)
+    result      = result * target_std + target_mean
 
     if return_trajectory:
         return result, snapshots

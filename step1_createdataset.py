@@ -95,9 +95,10 @@ def create_windows(signals, curvatures):
             w_curv        = curv[:, start:end]                             # (3, WINDOW_SIZE)
             w_spike_hist  = compute_spike_histogram(w_curv)                # (3, N_BINS)
             w_mean        = w_sig.mean(axis=1)                             # (3,)
-            w_std         = w_sig.std(axis=1)                              # (3,)
-            w_kurt        = compute_kurtosis(w_sig, axis=1, fisher=True)   # (3,)
-            win_signals.append(w_sig)
+            w_std         = w_sig.std(axis=1).clip(1e-8)                   # (3,)
+            w_sig_norm    = (w_sig - w_mean[:, None]) / w_std[:, None]     # (3, WINDOW_SIZE) — zero mean, unit variance
+            w_kurt        = compute_kurtosis(w_sig_norm, axis=1, fisher=True)  # (3,)
+            win_signals.append(w_sig_norm)
             win_spike_hists.append(w_spike_hist)
             win_means.append(w_mean)
             win_stds.append(w_std)
