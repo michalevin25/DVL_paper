@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import glob
 import os
+from scipy import stats as scipy_stats
+from scipy.signal import welch
 from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX, N_BINS
 
 DATA_DIR     = "/Users/michal/Desktop/PhD/dvl paper/DATA"
@@ -262,3 +264,218 @@ for test_traj in [12, 13]:
 # ── Denoising visualisation ───────────────────────────────────────────────────
 
 plot_denoising_steps(spike_hist_0, mean_0, std_0, kurt_0, signal_length=N)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EVALUATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def window_stats(sig_tensor):
+    """(3, N) tensor → (mean, std, kurtosis) each shape (3,)."""
+    s = sig_tensor.numpy()
+    return s.mean(axis=1), s.std(axis=1), scipy_stats.kurtosis(s, axis=1, fisher=True)
+
+
+# ── Evaluation 1: Statistical fidelity ───────────────────────────────────────
+# For every window, generate with its real conditions and compare per-axis
+# statistics. Points on the diagonal mean the model reproduces the right
+# distribution. Train windows = blue, test windows (12-13) = red.
+
+print("Evaluation 1: statistical fidelity — generating for all windows...")
+
+real_m, real_s, real_k = [], [], []
+gen_m,  gen_s,  gen_k  = [], [], []
+is_test_flag            = []
+
+for idx in range(len(signals)):
+    hi = spike_hists[idx].unsqueeze(0)
+    mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0)
+    ki = kurtoses[idx].unsqueeze(0)
+
+    rm, rs, rk = window_stats(signals[idx])
+    gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
+    gm, gs, gk = window_stats(gen_i)
+
+    real_m.extend(rm);  real_s.extend(rs);  real_k.extend(rk)
+    gen_m.extend(gm);   gen_s.extend(gs);   gen_k.extend(gk)
+    is_test_flag.extend([traj_ids[idx] >= 12] * 3)
+
+real_m, real_s, real_k = np.array(real_m), np.array(real_s), np.array(real_k)
+gen_m,  gen_s,  gen_k  = np.array(gen_m),  np.array(gen_s),  np.array(gen_k)
+is_test_flag            = np.array(is_test_flag)
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+stat_pairs = [
+    (real_m, gen_m, "mean"),
+    (real_s, gen_s, "std"),
+    (real_k, gen_k, "kurtosis"),
+]
+for ax, (real, gen, label) in zip(axes, stat_pairs):
+    tr = ~is_test_flag
+    te =  is_test_flag
+    ax.scatter(real[tr], gen[tr], color="steelblue", alpha=0.7, s=30, label="train")
+    ax.scatter(real[te], gen[te], color="red",       alpha=0.9, s=60, label="test", zorder=5)
+    lo = min(real.min(), gen.min())
+    hi = max(real.max(), gen.max())
+    ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, alpha=0.5)
+    r, _ = scipy_stats.pearsonr(real, gen)
+    ax.text(0.05, 0.92, f"r = {r:.3f}", transform=ax.transAxes, fontsize=9)
+    ax.set_xlabel(f"real {label}")
+    ax.set_ylabel(f"generated {label}")
+    ax.set_title(label)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+fig.suptitle("Evaluation 1: statistical fidelity — real vs generated statistics (per axis per window)")
+plt.tight_layout()
+plt.show()
+
+
+# ── Evaluation 2: Power spectral density ─────────────────────────────────────
+# Average PSD of real vs generated signals over the test windows.
+# A good model should match the frequency content of real signals.
+
+print("Evaluation 2: power spectral density...")
+
+test_indices = np.where(traj_ids >= 12)[0]
+nperseg      = min(64, N)
+
+real_psds, gen_psds = [], []
+for idx in test_indices:
+    hi = spike_hists[idx].unsqueeze(0)
+    mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0)
+    ki = kurtoses[idx].unsqueeze(0)
+    gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
+
+    for ax in range(3):
+        freqs, Pr = welch(signals[idx, ax].numpy(), nperseg=nperseg)
+        _,     Pg = welch(gen_i[ax].numpy(),        nperseg=nperseg)
+        real_psds.append(Pr)
+        gen_psds.append(Pg)
+
+real_psds = np.array(real_psds)  # (n_windows*3, n_freq)
+gen_psds  = np.array(gen_psds)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.semilogy(freqs, real_psds.mean(axis=0), color="red",       linewidth=1.5, label="real")
+ax.fill_between(freqs,
+                real_psds.mean(axis=0) - real_psds.std(axis=0),
+                real_psds.mean(axis=0) + real_psds.std(axis=0),
+                color="red", alpha=0.15)
+ax.semilogy(freqs, gen_psds.mean(axis=0), color="steelblue",  linewidth=1.5, label="generated")
+ax.fill_between(freqs,
+                gen_psds.mean(axis=0) - gen_psds.std(axis=0),
+                gen_psds.mean(axis=0) + gen_psds.std(axis=0),
+                color="steelblue", alpha=0.15)
+ax.set_xlabel("Frequency (normalized)")
+ax.set_ylabel("Power")
+ax.set_title("Evaluation 2: power spectral density — test trajectories (mean ± std)")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+
+# ── Evaluation 3: Diversity ───────────────────────────────────────────────────
+# Same conditions, 5 different seeds → shows that the model generates varied
+# signals rather than always producing the same output.
+# Shaded band = ±1 std across seeds.
+
+print("Evaluation 3: diversity...")
+
+div_seeds  = [0, 42, 123, 999, 2024]
+div_colors = ["steelblue", "darkorange", "green", "purple", "brown"]
+
+for idx in test_indices[:2]:
+    hi = spike_hists[idx].unsqueeze(0)
+    mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0)
+    ki = kurtoses[idx].unsqueeze(0)
+
+    samples = np.stack([
+        generate(hi, mi, si, ki, signal_length=N, seed=s).numpy()
+        for s in div_seeds
+    ])  # (5, 3, N)
+
+    smean = samples.mean(axis=0)
+    sstd  = samples.std(axis=0)
+    t     = np.arange(N)
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
+    for ax_i in range(3):
+        axes[ax_i].plot(signals[idx, ax_i].numpy(), color="red",
+                        linewidth=1.4, label="real", zorder=10)
+        for j, (s, c) in enumerate(zip(samples, div_colors)):
+            axes[ax_i].plot(s[ax_i], color=c, linewidth=0.8, alpha=0.55,
+                            label=f"seed {div_seeds[j]}")
+        axes[ax_i].fill_between(t, smean[ax_i] - sstd[ax_i],
+                                   smean[ax_i] + sstd[ax_i],
+                                color="steelblue", alpha=0.18, label="±1 std")
+        axes[ax_i].set_ylabel(vel_labels[ax_i])
+        axes[ax_i].legend(fontsize=7, ncol=4)
+        axes[ax_i].grid(True, alpha=0.3)
+
+    pairwise = [
+        np.sqrt(np.mean((samples[i] - samples[j]) ** 2))
+        for i in range(len(samples))
+        for j in range(i + 1, len(samples))
+    ]
+    fig.suptitle(
+        f"Evaluation 3: diversity — trajectory {traj_ids[idx]}, window {idx} — "
+        f"5 seeds  (mean pairwise RMS = {np.mean(pairwise):.4f})"
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+# ── Evaluation 4: Controllability ────────────────────────────────────────────
+# Show that the spike histogram conditioning actually shifts where activity
+# appears in the generated signal. For each designed scenario, plot the
+# per-bin RMS energy of the generated signal alongside the input histogram.
+
+print("Evaluation 4: controllability...")
+
+ctrl_scenarios = [
+    (hist_none,  "no maneuvers"),
+    (hist_early, "early (~t=30)"),
+    (hist_mid,   "mid (~t=100)"),
+    (hist_late,  "late (~t=170)"),
+    (hist_two,   "two maneuvers"),
+]
+
+fig, axes = plt.subplots(2, len(ctrl_scenarios), figsize=(20, 6))
+bin_edges  = np.linspace(0, N, N_BINS + 1, dtype=int)
+bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+for col, (hist, title) in enumerate(ctrl_scenarios):
+    gen = generate(hist, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
+    gen_np = gen.numpy()  # (3, N)
+
+    # input histogram (mean over axes)
+    hist_np = hist[0].numpy().mean(axis=0)  # (N_BINS,)
+
+    # per-bin RMS of the generated signal (mean over axes)
+    gen_rms = np.array([
+        np.sqrt(np.mean(gen_np[:, bin_edges[b]:bin_edges[b+1]] ** 2))
+        for b in range(N_BINS)
+    ])
+
+    axes[0, col].bar(bin_centers, hist_np,  width=N / N_BINS * 0.8,
+                     color="darkorange", alpha=0.8)
+    axes[0, col].set_title(title, fontsize=8)
+    axes[0, col].set_ylim(0, None)
+    if col == 0:
+        axes[0, col].set_ylabel("input histogram")
+
+    axes[1, col].bar(bin_centers, gen_rms, width=N / N_BINS * 0.8,
+                     color="steelblue", alpha=0.8)
+    axes[1, col].set_ylim(0, None)
+    if col == 0:
+        axes[1, col].set_ylabel("generated signal RMS")
+
+fig.suptitle("Evaluation 4: controllability — input spike histogram vs generated signal energy per bin")
+plt.tight_layout()
+plt.show()
+
+print("All evaluations complete.")
