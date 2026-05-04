@@ -184,7 +184,7 @@ def sample_sigma(batch_size, P_mean=-1.2, P_std=1.2):
     log_sigma = torch.randn(batch_size) * P_std + P_mean
     return torch.exp(log_sigma)
 
-def train(epochs=15000, batch_size=4, lr=3e-5):
+def train(epochs=15000, batch_size=4, lr=1e-4):
     dataset    = DVLDataset(DATASET_PATH)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -220,7 +220,7 @@ def train(epochs=15000, batch_size=4, lr=3e-5):
         f.write(f"  lr            = {lr}\n")
         f.write(f"  optimizer     = Adam\n")
         f.write(f"  grad_clip     = 1.0  (clip_grad_norm)\n")
-        f.write(f"  loss_weight   = clamped at max 100\n\n")
+        f.write(f"  loss_weight   = clamped at max 10\n\n")
         f.write("[Dataset]\n")
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
@@ -251,7 +251,7 @@ def train(epochs=15000, batch_size=4, lr=3e-5):
             x_hat = model(z, sigma, curvatures, means, stds, kurtoses)    # (B, 3, L)
 
             # weighted loss — clamp weight to prevent extreme values at small σ
-            w    = loss_weight(sigma).clamp(max=100.0).view(B, 1, 1)
+            w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()
 
             optimizer.zero_grad()
@@ -268,6 +268,10 @@ def train(epochs=15000, batch_size=4, lr=3e-5):
             print(f"Epoch {epoch:>6} / {epochs} — loss: {avg_loss:.6f}")
             with open(log_path, "a") as f:
                 f.write(f"  epoch {epoch:>6} / {epochs}  loss = {avg_loss:.6f}\n")
+
+        if epoch % 500 == 0:
+            torch.save(model.state_dict(), "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt")
+
 
     torch.save(model.state_dict(), "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt")
     print("Model saved to DATA/edm_model.pt")
