@@ -200,8 +200,10 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
     print(f"Parameters: {n_params:,}\n")
 
     # save training config to a timestamped log file
-    run_time  = datetime.now()
-    log_path  = f"/Users/michal/Desktop/PhD/dvl paper/DATA/training_log_{run_time.strftime('%Y%m%d_%H%M%S')}.txt"
+    run_time   = datetime.now()
+    timestamp  = run_time.strftime('%Y%m%d_%H%M%S')
+    log_path   = f"/Users/michal/Desktop/PhD/dvl paper/DATA/training_log_{timestamp}.txt"
+    model_path = f"/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model_{timestamp}.pt"
     with open(log_path, "w") as f:
         f.write(f"Training run: {run_time.strftime('%Y-%m-%d  %H:%M:%S')}\n")
         f.write("=" * 50 + "\n\n")
@@ -229,7 +231,10 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
         f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
-        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n")
+        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n\n")
+        f.write(f"[Files]\n")
+        f.write(f"  model         = {model_path}\n")
+        f.write(f"  log           = {log_path}\n")
     print(f"Training config saved to {log_path}\n")
 
     with open(log_path, "a") as f:
@@ -274,11 +279,10 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
                 f.write(f"  epoch {epoch:>6} / {epochs}  loss = {avg_loss:.6f}\n")
 
         if epoch % 500 == 0:
-            torch.save(model.state_dict(), "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt")
+            torch.save(model.state_dict(), model_path)
 
-
-    torch.save(model.state_dict(), "/Users/michal/Desktop/PhD/dvl paper/DATA/edm_model.pt")
-    print("Model saved to DATA/edm_model.pt")
+    torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
     end_time = datetime.now()
     with open(log_path, "a") as f:
