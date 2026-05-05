@@ -183,6 +183,8 @@ class EDMModel(nn.Module):
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
+P_UNCOND = 0.15   # fraction of samples trained unconditionally (CFG dropout)
+
 def sample_sigma(batch_size, device, P_mean=-1.2, P_std=1.2):
     log_sigma = torch.randn(batch_size, device=device) * P_std + P_mean
     return torch.exp(log_sigma)
@@ -227,6 +229,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  optimizer     = Adam\n")
         f.write(f"  grad_clip     = 1.0  (clip_grad_norm)\n")
         f.write(f"  loss_weight   = clamped at max 10\n")
+        f.write(f"  cfg_dropout   = {P_UNCOND}  (per-sample condition dropout)\n")
         f.write(f"  device        = {device}\n\n")
         f.write("[Dataset]\n")
         f.write(f"  path          = {DATASET_PATH}\n")
@@ -258,7 +261,14 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
             co     = c_out(sigma).view(B, 1, 1)
             target = (signals - cs * z) / co
 
-            x_hat = model(z, sigma, peak_maps, means, stds, kurtoses)
+            # CFG condition dropout: per sample, zero all conditions with prob P_UNCOND
+            keep = (torch.rand(B, device=device) > P_UNCOND).float()
+            peak_maps_in = peak_maps * keep.view(B, 1, 1)
+            means_in     = means     * keep.view(B, 1)
+            stds_in      = stds      * keep.view(B, 1)
+            kurtoses_in  = kurtoses  * keep.view(B, 1)
+
+            x_hat = model(z, sigma, peak_maps_in, means_in, stds_in, kurtoses_in)
 
             w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()

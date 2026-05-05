@@ -30,14 +30,15 @@ print("Model loaded.")
 
 # ── EDM sampler (deterministic Euler-Heun) ────────────────────────────────────
 
-def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed=None, return_trajectory=False):
+def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed=None,
+             cfg_scale=1.0, return_trajectory=False):
     """
     Generate a signal conditioned on a peak map and scalar statistics.
-    peak_map:      (1, 3, signal_length) — Gaussian bumps at top-K curvature peaks
+    peak_map:      (1, 3, signal_length)
     mean:          (1, 3)
     std:           (1, 3)
     kurtosis:      (1, 3)
-    signal_length: number of time samples to generate
+    cfg_scale:     classifier-free guidance strength (1.0 = no CFG, 2-4 = typical)
     returns:       (3, signal_length)
     """
     if seed is not None:
@@ -45,6 +46,12 @@ def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed
 
     x      = torch.randn(1, 3, signal_length) * SIGMA_MAX
     sigmas = torch.exp(torch.linspace(np.log(SIGMA_MAX), np.log(SIGMA_MIN), n_steps + 1))
+
+    # null conditions for CFG unconditional pass
+    null_peak_map = torch.zeros_like(peak_map)
+    null_mean     = torch.zeros_like(mean)
+    null_std      = torch.zeros_like(std)
+    null_kurtosis = torch.zeros_like(kurtosis)
 
     snapshots = []
 
@@ -54,14 +61,25 @@ def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed
             sigma_next = sigmas[i + 1].expand(1)
             dt         = (sigma_next - sigma_cur).view(1, 1, 1)
 
-            x_denoised = model(x, sigma_cur, peak_map, mean, std, kurtosis)
-            d_cur      = (x - x_denoised) / sigma_cur.view(1, 1, 1)
-            x_next     = x + dt * d_cur
+            x_denoised_cond = model(x, sigma_cur, peak_map, mean, std, kurtosis)
+            if cfg_scale != 1.0:
+                x_denoised_uncond = model(x, sigma_cur, null_peak_map, null_mean, null_std, null_kurtosis)
+                x_denoised = x_denoised_uncond + cfg_scale * (x_denoised_cond - x_denoised_uncond)
+            else:
+                x_denoised = x_denoised_cond
+
+            d_cur  = (x - x_denoised) / sigma_cur.view(1, 1, 1)
+            x_next = x + dt * d_cur
 
             if i < n_steps - 1:
-                x_denoised_next = model(x_next, sigma_next, peak_map, mean, std, kurtosis)
-                d_next          = (x_next - x_denoised_next) / sigma_next.view(1, 1, 1)
-                x_next          = x + dt * (d_cur + d_next) / 2
+                x_denoised_next_cond = model(x_next, sigma_next, peak_map, mean, std, kurtosis)
+                if cfg_scale != 1.0:
+                    x_denoised_next_uncond = model(x_next, sigma_next, null_peak_map, null_mean, null_std, null_kurtosis)
+                    x_denoised_next = x_denoised_next_uncond + cfg_scale * (x_denoised_next_cond - x_denoised_next_uncond)
+                else:
+                    x_denoised_next = x_denoised_next_cond
+                d_next = (x_next - x_denoised_next) / sigma_next.view(1, 1, 1)
+                x_next = x + dt * (d_cur + d_next) / 2
 
             x = x_next
 
