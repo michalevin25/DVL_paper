@@ -5,7 +5,10 @@ import glob
 import os
 from scipy import stats as scipy_stats
 from scipy.signal import welch
-from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX, N_BINS
+from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX
+
+PEAK_SIGMA  = 10   # must match step1
+K_PEAKS     = 3
 
 DATA_DIR     = "/Users/michal/Desktop/PhD/dvl paper/DATA"
 DATASET_PATH = f"{DATA_DIR}/dvl_dataset.npz"
@@ -27,10 +30,10 @@ print("Model loaded.")
 
 # ── EDM sampler (deterministic Euler-Heun) ────────────────────────────────────
 
-def generate(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, seed=None, return_trajectory=False):
+def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed=None, return_trajectory=False):
     """
-    Generate a signal conditioned on a spike histogram and scalar statistics.
-    spike_hist:    (1, 3, N_BINS)  — maneuver timing and intensity
+    Generate a signal conditioned on a peak map and scalar statistics.
+    peak_map:      (1, 3, signal_length) — Gaussian bumps at top-K curvature peaks
     mean:          (1, 3)
     std:           (1, 3)
     kurtosis:      (1, 3)
@@ -51,12 +54,12 @@ def generate(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, se
             sigma_next = sigmas[i + 1].expand(1)
             dt         = (sigma_next - sigma_cur).view(1, 1, 1)
 
-            x_denoised = model(x, sigma_cur, spike_hist, mean, std, kurtosis)
+            x_denoised = model(x, sigma_cur, peak_map, mean, std, kurtosis)
             d_cur      = (x - x_denoised) / sigma_cur.view(1, 1, 1)
             x_next     = x + dt * d_cur
 
             if i < n_steps - 1:
-                x_denoised_next = model(x_next, sigma_next, spike_hist, mean, std, kurtosis)
+                x_denoised_next = model(x_next, sigma_next, peak_map, mean, std, kurtosis)
                 d_next          = (x_next - x_denoised_next) / sigma_next.view(1, 1, 1)
                 x_next          = x + dt * (d_cur + d_next) / 2
 
@@ -77,17 +80,19 @@ def generate(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, se
     return result
 
 
-def make_hist(bin_indices, amplitudes, n_bins=N_BINS):
+def make_peak_map(peak_times, amplitudes, signal_length=206, sigma=PEAK_SIGMA):
     """
-    Build a (1, 3, N_BINS) spike histogram manually.
-    bin_indices: list of bin positions (0–N_BINS-1) where spikes occur
-    amplitudes:  corresponding amplitude values
-    All three axes get the same histogram.
+    Build a (1, 3, signal_length) peak map from specified maneuver events.
+    peak_times:  list of sample indices where peaks occur
+    amplitudes:  corresponding amplitude values (positive = forward, negative = reverse)
+    All three axes get the same map; adjust per-axis after if needed.
     """
-    hist = torch.zeros(1, 3, n_bins)
-    for b, a in zip(bin_indices, amplitudes):
-        hist[0, :, b] = a
-    return hist
+    t   = np.arange(signal_length, dtype=np.float32)
+    out = np.zeros(signal_length, dtype=np.float32)
+    for loc, amp in zip(peak_times, amplitudes):
+        out += amp * np.exp(-((t - loc) ** 2) / (2 * sigma ** 2))
+    pm = torch.tensor(out).unsqueeze(0).expand(3, -1)  # (3, L)
+    return pm.unsqueeze(0).clone()                      # (1, 3, L)
 
 
 def plot_3d_trajectory(signals_list, labels_list, colors_list, title, dt=1.0):
@@ -109,8 +114,8 @@ def plot_3d_trajectory(signals_list, labels_list, colors_list, title, dt=1.0):
     plt.show()
 
 
-def plot_denoising_steps(spike_hist, mean, std, kurtosis, signal_length=206, n_steps=200, seed=42):
-    _, snapshots = generate(spike_hist, mean, std, kurtosis, signal_length, n_steps, seed, return_trajectory=True)
+def plot_denoising_steps(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed=42):
+    _, snapshots = generate(peak_map, mean, std, kurtosis, signal_length, n_steps, seed, return_trajectory=True)
     indices  = np.linspace(0, len(snapshots) - 1, 6, dtype=int)
     selected = [snapshots[i] for i in indices]
     fig, axes = plt.subplots(3, 6, figsize=(20, 7), sharex=True)
@@ -130,22 +135,22 @@ def plot_denoising_steps(spike_hist, mean, std, kurtosis, signal_length=206, n_s
 
 # ── Load dataset ──────────────────────────────────────────────────────────────
 
-data        = np.load(DATASET_PATH)
-spike_hists = torch.tensor(data["spike_hists"], dtype=torch.float32)  # (W, 3, N_BINS)
-means       = torch.tensor(data["means"],       dtype=torch.float32)  # (W, 3)
-stds        = torch.tensor(data["stds"],        dtype=torch.float32)  # (W, 3)
-kurtoses    = torch.tensor(data["kurtoses"],    dtype=torch.float32)  # (W, 3)
-signals     = torch.tensor(data["signals"],     dtype=torch.float32)  # (W, 3, N)
-traj_ids    = data["traj_ids"]                                         # (W,)
+data      = np.load(DATASET_PATH)
+peak_maps = torch.tensor(data["peak_maps"], dtype=torch.float32)  # (W, 3, N)
+means     = torch.tensor(data["means"],     dtype=torch.float32)  # (W, 3)
+stds      = torch.tensor(data["stds"],      dtype=torch.float32)  # (W, 3)
+kurtoses  = torch.tensor(data["kurtoses"],  dtype=torch.float32)  # (W, 3)
+signals   = torch.tensor(data["signals"],   dtype=torch.float32)  # (W, 3, N)
+traj_ids  = data["traj_ids"]                                       # (W,)
 
-N            = signals.shape[-1]   # signal length (206)
-vel_labels   = ["vx", "vy", "vz"]
-cond_idx     = 0
-real_signal  = signals[cond_idx]
-spike_hist_0 = spike_hists[cond_idx].unsqueeze(0)  # (1, 3, N_BINS)
-mean_0       = means[cond_idx].unsqueeze(0)
-std_0        = stds[cond_idx].unsqueeze(0)
-kurt_0       = kurtoses[cond_idx].unsqueeze(0)
+N           = signals.shape[-1]   # signal length (206)
+vel_labels  = ["vx", "vy", "vz"]
+cond_idx    = 0
+real_signal = signals[cond_idx]
+peak_map_0  = peak_maps[cond_idx].unsqueeze(0)  # (1, 3, N)
+mean_0      = means[cond_idx].unsqueeze(0)
+std_0       = stds[cond_idx].unsqueeze(0)
+kurt_0      = kurtoses[cond_idx].unsqueeze(0)
 
 
 # ── Shared conditions for tests (used in commented-out tests below) ───────────
@@ -154,43 +159,44 @@ mean_syn = means[0].unsqueeze(0)
 std_syn  = stds[0].unsqueeze(0)
 kurt_syn = kurtoses[0].unsqueeze(0)
 
-hist_none  = make_hist([], [])
-hist_early = make_hist([3],     [1.0])
-hist_mid   = make_hist([10],    [1.0])
-hist_late  = make_hist([17],    [1.0])
-hist_two   = make_hist([4, 15], [1.0, 1.0])
-hist_heavy = make_hist([4, 10, 15], [1.5, 1.0, 1.5])
+# peak times are sample indices (0–205); amplitudes are arbitrary signed floats
+peak_none  = make_peak_map([], [])
+peak_early = make_peak_map([30],      [2.0])
+peak_mid   = make_peak_map([103],     [2.0])
+peak_late  = make_peak_map([175],     [2.0])
+peak_two   = make_peak_map([40, 155], [2.0, 2.0])
+peak_heavy = make_peak_map([40, 103, 155], [2.0, 1.5, 2.0])
 
-# ── Test 1: designed spike histograms ────────────────────────────────────────
+# ── Test 1: designed peak maps ────────────────────────────────────────────────
 # scenarios = [
-#     (hist_none,  "no maneuvers"),
-#     (hist_early, "early maneuver (~t=30)"),
-#     (hist_mid,   "mid maneuver (~t=100)"),
-#     (hist_late,  "late maneuver (~t=170)"),
-#     (hist_two,   "two maneuvers (~t=40, 150)"),
-#     (hist_heavy, "three maneuvers"),
+#     (peak_none,  "no maneuvers"),
+#     (peak_early, "early maneuver (~t=30)"),
+#     (peak_mid,   "mid maneuver (~t=103)"),
+#     (peak_late,  "late maneuver (~t=175)"),
+#     (peak_two,   "two maneuvers (~t=40, 155)"),
+#     (peak_heavy, "three maneuvers"),
 # ]
 # fig, axes = plt.subplots(3, len(scenarios), figsize=(22, 8), sharex=True)
-# for col, (hist, title) in enumerate(scenarios):
-#     gen = generate(hist, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
+# for col, (pm, title) in enumerate(scenarios):
+#     gen = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
 #     for row in range(3):
 #         axes[row, col].plot(gen[row].numpy(), color="steelblue", linewidth=0.9)
 #         axes[row, col].grid(True, alpha=0.3)
 #         if col == 0:
 #             axes[row, col].set_ylabel(vel_labels[row])
 #     axes[0, col].set_title(title, fontsize=8)
-# fig.suptitle("Test 1: designed spike histograms — maneuver timing control")
+# fig.suptitle("Test 1: designed peak maps — maneuver timing control")
 # plt.tight_layout()
 # plt.show()
 
 
-# ── Test 2: same histogram, different seeds ───────────────────────────────────
+# ── Test 2: same peak map, different seeds ────────────────────────────────────
 # seeds  = [0, 42, 123, 999, 2024]
 # colors = ["steelblue", "darkorange", "green", "purple", "brown"]
 # fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
 # for i in range(3):
 #     for j, seed in enumerate(seeds):
-#         gen = generate(hist_two, mean_syn, std_syn, kurt_syn, signal_length=N, seed=seed)
+#         gen = generate(peak_two, mean_syn, std_syn, kurt_syn, signal_length=N, seed=seed)
 #         axes[i].plot(gen[i].numpy(), label=f"seed={seed}", color=colors[j], linewidth=0.9, alpha=0.8)
 #     axes[i].set_ylabel(vel_labels[i])
 #     axes[i].legend(fontsize=7, ncol=5)
@@ -200,27 +206,27 @@ hist_heavy = make_hist([4, 10, 15], [1.5, 1.0, 1.5])
 # plt.show()
 
 
-# ── Test 3: real spike histogram vs flat histogram ────────────────────────────
+# ── Test 3: real peak map vs empty peak map ───────────────────────────────────
 # compare_indices = [0, 15, 30]
 # fig, axes = plt.subplots(3, len(compare_indices) * 2, figsize=(22, 8), sharex=True)
 # for col, idx in enumerate(compare_indices):
-#     hist_real = spike_hists[idx].unsqueeze(0)
-#     hist_zero = make_hist([], [])
-#     mean_t    = means[idx].unsqueeze(0)
-#     std_t     = stds[idx].unsqueeze(0)
-#     kurt_t    = kurtoses[idx].unsqueeze(0)
-#     gen_real = generate(hist_real, mean_t, std_t, kurt_t, signal_length=N, seed=42)
-#     gen_zero = generate(hist_zero, mean_t, std_t, kurt_t, signal_length=N, seed=42)
+#     pm_real  = peak_maps[idx].unsqueeze(0)
+#     pm_empty = make_peak_map([], [])
+#     mean_t   = means[idx].unsqueeze(0)
+#     std_t    = stds[idx].unsqueeze(0)
+#     kurt_t   = kurtoses[idx].unsqueeze(0)
+#     gen_real  = generate(pm_real,  mean_t, std_t, kurt_t, signal_length=N, seed=42)
+#     gen_empty = generate(pm_empty, mean_t, std_t, kurt_t, signal_length=N, seed=42)
 #     for row in range(3):
-#         axes[row, col * 2].plot(gen_real[row].numpy(), color="steelblue",  linewidth=0.9)
-#         axes[row, col * 2 + 1].plot(gen_zero[row].numpy(), color="darkorange", linewidth=0.9)
+#         axes[row, col * 2].plot(gen_real[row].numpy(),  color="steelblue",  linewidth=0.9)
+#         axes[row, col * 2 + 1].plot(gen_empty[row].numpy(), color="darkorange", linewidth=0.9)
 #         axes[row, col * 2].grid(True, alpha=0.3)
 #         axes[row, col * 2 + 1].grid(True, alpha=0.3)
 #         if col == 0:
 #             axes[row, col * 2].set_ylabel(vel_labels[row])
-#     axes[0, col * 2].set_title(f"win {idx} — real hist", fontsize=8)
+#     axes[0, col * 2].set_title(f"win {idx} — real peaks", fontsize=8)
 #     axes[0, col * 2 + 1].set_title(f"win {idx} — no maneuvers", fontsize=8)
-# fig.suptitle("Test 3: real spike histogram vs flat histogram (same stats)")
+# fig.suptitle("Test 3: real peak map vs empty peak map (same stats)")
 # plt.tight_layout()
 # plt.show()
 
@@ -229,12 +235,12 @@ hist_heavy = make_hist([4, 10, 15], [1.5, 1.0, 1.5])
 # for test_traj in [12, 13]:
 #     test_mask    = np.where(traj_ids == test_traj)[0]
 #     test_win_idx = test_mask[len(test_mask) // 2]
-#     hist_test = spike_hists[test_win_idx].unsqueeze(0)
+#     pm_test   = peak_maps[test_win_idx].unsqueeze(0)
 #     mean_test = means[test_win_idx].unsqueeze(0)
 #     std_test  = stds[test_win_idx].unsqueeze(0)
 #     kurt_test = kurtoses[test_win_idx].unsqueeze(0)
 #     real_test = signals[test_win_idx]
-#     gen_test = generate(hist_test, mean_test, std_test, kurt_test, signal_length=N, seed=42)
+#     gen_test = generate(pm_test, mean_test, std_test, kurt_test, signal_length=N, seed=42)
 #     fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
 #     for i in range(3):
 #         axes[i].plot(real_test[i].numpy(), label="real (unseen)", color="red",       linewidth=1.4)
@@ -254,7 +260,7 @@ hist_heavy = make_hist([4, 10, 15], [1.5, 1.0, 1.5])
 
 
 # ── Denoising visualisation ───────────────────────────────────────────────────
-plot_denoising_steps(spike_hist_0, mean_0, std_0, kurt_0, signal_length=N)
+plot_denoising_steps(peak_map_0, mean_0, std_0, kurt_0, signal_length=N)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,26 +364,27 @@ def window_stats(sig_tensor):
 
 # ── Evaluation 4: Controllability ────────────────────────────────────────────
 # ctrl_scenarios = [
-#     (hist_none,  "no maneuvers"), (hist_early, "early (~t=30)"),
-#     (hist_mid,   "mid (~t=100)"), (hist_late,  "late (~t=170)"),
-#     (hist_two,   "two maneuvers"),
+#     (peak_none,  "no maneuvers"), (peak_early, "early (~t=30)"),
+#     (peak_mid,   "mid (~t=103)"), (peak_late,  "late (~t=175)"),
+#     (peak_two,   "two maneuvers"),
 # ]
+# N_BINS_EVAL = 20
 # print("Evaluation 4: controllability...")
 # fig, axes = plt.subplots(2, len(ctrl_scenarios), figsize=(20, 6))
-# bin_edges   = np.linspace(0, N, N_BINS + 1, dtype=int)
+# bin_edges   = np.linspace(0, N, N_BINS_EVAL + 1, dtype=int)
 # bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-# for col, (hist, title) in enumerate(ctrl_scenarios):
-#     gen = generate(hist, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
-#     gen_np  = gen.numpy()
-#     hist_np = hist[0].numpy().mean(axis=0)
-#     gen_rms = np.array([np.sqrt(np.mean(gen_np[:, bin_edges[b]:bin_edges[b+1]]**2)) for b in range(N_BINS)])
-#     axes[0, col].bar(bin_centers, hist_np, width=N/N_BINS*0.8, color="darkorange", alpha=0.8)
-#     axes[0, col].set_title(title, fontsize=8); axes[0, col].set_ylim(0, None)
-#     if col == 0: axes[0, col].set_ylabel("input histogram")
-#     axes[1, col].bar(bin_centers, gen_rms, width=N/N_BINS*0.8, color="steelblue", alpha=0.8)
+# for col, (pm, title) in enumerate(ctrl_scenarios):
+#     gen    = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
+#     gen_np = gen.numpy()
+#     pm_np  = pm[0].numpy().mean(axis=0)
+#     gen_rms = np.array([np.sqrt(np.mean(gen_np[:, bin_edges[b]:bin_edges[b+1]]**2)) for b in range(N_BINS_EVAL)])
+#     axes[0, col].plot(pm_np, color="darkorange", linewidth=0.9)
+#     axes[0, col].set_title(title, fontsize=8)
+#     if col == 0: axes[0, col].set_ylabel("input peak map")
+#     axes[1, col].bar(bin_centers, gen_rms, width=N/N_BINS_EVAL*0.8, color="steelblue", alpha=0.8)
 #     axes[1, col].set_ylim(0, None)
 #     if col == 0: axes[1, col].set_ylabel("generated signal RMS")
-# fig.suptitle("Evaluation 4: controllability — input spike histogram vs generated signal energy per bin")
+# fig.suptitle("Evaluation 4: controllability — input peak map vs generated signal energy per bin")
 # plt.tight_layout(); plt.show()
 
 print("Evaluations 1–4 commented out.")
@@ -390,17 +397,17 @@ print("Evaluations 1–4 commented out.")
 print("Evaluation 5: condition ablation...")
 
 abl_idx  = np.where(traj_ids == 3)[0][len(np.where(traj_ids == 3)[0]) // 2]   # middle window of trajectory 3
-abl_hist = spike_hists[abl_idx].unsqueeze(0)
+abl_pm   = peak_maps[abl_idx].unsqueeze(0)
 abl_mean = means[abl_idx].unsqueeze(0)
 abl_std  = stds[abl_idx].unsqueeze(0)
 abl_kurt = kurtoses[abl_idx].unsqueeze(0)
 
 ablation_scenarios = [
-    (abl_hist,          abl_mean,                   abl_std,                  abl_kurt,                   "baseline\n(all conditions)"),
-    (make_hist([], []), abl_mean,                   abl_std,                  abl_kurt,                   "no spike hist\n(flat histogram)"),
-    (abl_hist,          torch.zeros_like(abl_mean), torch.ones_like(abl_std), abl_kurt,                   "no mean+std\n(mean→0, std→1)"),
-    (abl_hist,          abl_mean,                   abl_std,                  torch.zeros_like(abl_kurt), "no kurtosis\n(kurt → 0)"),
-    (make_hist([], []), torch.zeros_like(abl_mean), torch.ones_like(abl_std), torch.zeros_like(abl_kurt), "all ablated\n(all default)"),
+    (abl_pm,               abl_mean,                   abl_std,                  abl_kurt,                   "baseline\n(all conditions)"),
+    (make_peak_map([], []), abl_mean,                   abl_std,                  abl_kurt,                   "no peak map\n(empty)"),
+    (abl_pm,               torch.zeros_like(abl_mean), torch.ones_like(abl_std), abl_kurt,                   "no mean+std\n(mean→0, std→1)"),
+    (abl_pm,               abl_mean,                   abl_std,                  torch.zeros_like(abl_kurt), "no kurtosis\n(kurt → 0)"),
+    (make_peak_map([], []), torch.zeros_like(abl_mean), torch.ones_like(abl_std), torch.zeros_like(abl_kurt), "all ablated\n(all default)"),
 ]
 
 fig, axes = plt.subplots(3, len(ablation_scenarios), figsize=(22, 8), sharex=True)

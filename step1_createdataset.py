@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import kurtosis as compute_kurtosis
+from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 
 DATA_PATH      = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
@@ -12,7 +13,8 @@ N_TRAJECTORIES = 13
 SMOOTHING      = 0.5
 WINDOW_SIZE    = 206
 STRIDE         = 50
-N_BINS         = 20   # bins in the spike histogram
+K_PEAKS        = 3    # top-K curvature peaks per axis
+PEAK_SIGMA     = 10   # Gaussian bump width (samples)
 
 
 # ── 1. Load raw signals ────────────────────────────────────────────────────────
@@ -47,20 +49,26 @@ def compute_curvature(signal_3axis, time):
     return curvature  # (3, N)
 
 
-# ── 2b. Compute spike histogram from curvature ───────────────────────────────
+# ── 2b. Compute peak-descriptor map from curvature ──────────────────────────
 
-def compute_spike_histogram(curvature, n_bins=N_BINS):
+def compute_peak_map(curvature, k=K_PEAKS, sigma=PEAK_SIGMA):
     """
-    Coarse temporal histogram of curvature spike amplitude.
-    Each bin = max |curvature| over that time slice.
-    Input:  (3, N)  Output: (3, n_bins)
+    Detect the top-k curvature peaks per axis and reconstruct as Gaussian bumps.
+    Input:  (3, N)  Output: (3, N)  — sparse bump signal, designable at inference
     """
-    _, N  = curvature.shape
-    hist  = np.zeros((3, n_bins))
-    edges = np.linspace(0, N, n_bins + 1, dtype=int)
-    for b in range(n_bins):
-        hist[:, b] = np.abs(curvature[:, edges[b]:edges[b + 1]]).max(axis=1)
-    return hist
+    n_axes, L = curvature.shape
+    peak_map  = np.zeros((n_axes, L))
+    t         = np.arange(L)
+    for ax in range(n_axes):
+        sig        = curvature[ax]
+        peaks, _   = find_peaks(np.abs(sig), height=0)
+        if len(peaks) == 0:
+            continue
+        amps       = np.abs(sig[peaks])
+        top_k      = peaks[np.argsort(amps)[-k:]]
+        for loc in top_k:
+            peak_map[ax] += sig[loc] * np.exp(-((t - loc) ** 2) / (2 * sigma ** 2))
+    return peak_map
 
 
 # ── 3. Compute per-trajectory mean and std ────────────────────────────────────
@@ -81,49 +89,49 @@ def normalize(signal_3axis, mean, std):
 # ── 5. Windowing ──────────────────────────────────────────────────────────────
 
 def create_windows(signals, curvatures):
-    win_signals     = []
-    win_spike_hists = []
-    win_means       = []
-    win_stds        = []
-    win_kurtoses    = []
-    win_traj_ids    = []
+    win_signals   = []
+    win_peak_maps = []
+    win_means     = []
+    win_stds      = []
+    win_kurtoses  = []
+    win_traj_ids  = []
     for traj_idx, (sig, curv) in enumerate(zip(signals, curvatures)):
         N = sig.shape[1]
         for start in range(0, N - WINDOW_SIZE + 1, STRIDE):
-            end           = start + WINDOW_SIZE
-            w_sig         = sig[:, start:end]                              # (3, WINDOW_SIZE)
-            w_curv        = curv[:, start:end]                             # (3, WINDOW_SIZE)
-            w_spike_hist  = compute_spike_histogram(w_curv)                # (3, N_BINS)
-            w_mean        = w_sig.mean(axis=1)                             # (3,)
-            w_std         = w_sig.std(axis=1).clip(1e-8)                   # (3,)
-            w_sig_norm    = (w_sig - w_mean[:, None]) / w_std[:, None]     # (3, WINDOW_SIZE) — zero mean, unit variance
-            w_kurt        = compute_kurtosis(w_sig_norm, axis=1, fisher=True)  # (3,)
+            end        = start + WINDOW_SIZE
+            w_sig      = sig[:, start:end]                              # (3, WINDOW_SIZE)
+            w_curv     = curv[:, start:end]                             # (3, WINDOW_SIZE)
+            w_peak_map = compute_peak_map(w_curv)                       # (3, WINDOW_SIZE)
+            w_mean     = w_sig.mean(axis=1)                             # (3,)
+            w_std      = w_sig.std(axis=1).clip(1e-8)                   # (3,)
+            w_sig_norm = (w_sig - w_mean[:, None]) / w_std[:, None]     # (3, WINDOW_SIZE)
+            w_kurt     = compute_kurtosis(w_sig_norm, axis=1, fisher=True)  # (3,)
             win_signals.append(w_sig_norm)
-            win_spike_hists.append(w_spike_hist)
+            win_peak_maps.append(w_peak_map)
             win_means.append(w_mean)
             win_stds.append(w_std)
             win_kurtoses.append(w_kurt)
             win_traj_ids.append(traj_idx + 1)
-    return win_signals, win_spike_hists, win_means, win_stds, win_kurtoses, win_traj_ids
+    return win_signals, win_peak_maps, win_means, win_stds, win_kurtoses, win_traj_ids
 
 
 # ── 4. PyTorch Dataset ─────────────────────────────────────────────────────────
 
 class DVLDataset(Dataset):
-    def __init__(self, signals, spike_hists, means, stds, kurtoses):
-        self.samples = list(zip(signals, spike_hists, means, stds, kurtoses))
+    def __init__(self, signals, peak_maps, means, stds, kurtoses):
+        self.samples = list(zip(signals, peak_maps, means, stds, kurtoses))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        signal, spike_hist, mean, std, kurt = self.samples[idx]
+        signal, peak_map, mean, std, kurt = self.samples[idx]
         return (
-            torch.tensor(signal,     dtype=torch.float32),  # (3, N)
-            torch.tensor(spike_hist, dtype=torch.float32),  # (3, N_BINS)
-            torch.tensor(mean,       dtype=torch.float32),  # (3,)
-            torch.tensor(std,        dtype=torch.float32),  # (3,)
-            torch.tensor(kurt,       dtype=torch.float32),  # (3,)
+            torch.tensor(signal,   dtype=torch.float32),  # (3, N)
+            torch.tensor(peak_map, dtype=torch.float32),  # (3, N)
+            torch.tensor(mean,     dtype=torch.float32),  # (3,)
+            torch.tensor(std,      dtype=torch.float32),  # (3,)
+            torch.tensor(kurt,     dtype=torch.float32),  # (3,)
         )
 
 
@@ -144,22 +152,22 @@ def build_pipeline(batch_size=4, save_path=None):
     signals_norm = [normalize(s, m, sd) for s, m, sd in zip(signals, means, stds)]
 
     print("Creating windows...")
-    win_signals, win_spike_hists, win_means, win_stds, win_kurtoses, win_traj_ids = create_windows(signals_norm, curvatures)
-    print(f"  {len(win_signals)} windows (window={WINDOW_SIZE}, stride={STRIDE}, bins={N_BINS})")
+    win_signals, win_peak_maps, win_means, win_stds, win_kurtoses, win_traj_ids = create_windows(signals_norm, curvatures)
+    print(f"  {len(win_signals)} windows (window={WINDOW_SIZE}, stride={STRIDE}, K={K_PEAKS} peaks, sigma={PEAK_SIGMA})")
 
     if save_path is not None:
         np.savez(
             save_path,
-            signals=np.stack(win_signals),            # (W, 3, WINDOW_SIZE)
-            spike_hists=np.stack(win_spike_hists),    # (W, 3, N_BINS)
-            means=np.stack(win_means),                # (W, 3)
-            stds=np.stack(win_stds),                  # (W, 3)
-            kurtoses=np.stack(win_kurtoses),          # (W, 3)
-            traj_ids=np.array(win_traj_ids),          # (W,) trajectory number 1–13
+            signals=np.stack(win_signals),          # (W, 3, WINDOW_SIZE)
+            peak_maps=np.stack(win_peak_maps),      # (W, 3, WINDOW_SIZE)
+            means=np.stack(win_means),              # (W, 3)
+            stds=np.stack(win_stds),                # (W, 3)
+            kurtoses=np.stack(win_kurtoses),        # (W, 3)
+            traj_ids=np.array(win_traj_ids),        # (W,)
         )
         print(f"  Saved dataset to {save_path}.npz")
 
-    dataset = DVLDataset(win_signals, win_spike_hists, win_means, win_stds, win_kurtoses)
+    dataset = DVLDataset(win_signals, win_peak_maps, win_means, win_stds, win_kurtoses)
     print(f"  Dataset size: {len(dataset)} windows")
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -176,18 +184,17 @@ if __name__ == "__main__":
     signals, times = load_signals()
     curvatures = [compute_curvature(s, t) for s, t in zip(signals, times)]
 
-    # plot signals and their spike histograms for the first trajectory
+    # plot signals and their peak maps for the first trajectory
     fig, axes = plt.subplots(2, 3, figsize=(14, 5))
     labels = ["vx", "vy", "vz"]
-    sig0  = signals[0]
-    curv0 = curvatures[0]
-    hist0 = compute_spike_histogram(curv0)
-    bin_centers = np.linspace(0, sig0.shape[1], N_BINS)
+    sig0      = signals[0]
+    curv0     = curvatures[0]
+    peak_map0 = compute_peak_map(curv0)
     for i in range(3):
         axes[0, i].plot(times[0], sig0[i], color="steelblue", linewidth=0.8)
         axes[0, i].set_title(f"Signal — {labels[i]}")
-        axes[1, i].bar(bin_centers, hist0[i], width=sig0.shape[1] / N_BINS * 0.8,
-                       color="darkorange", alpha=0.8)
-        axes[1, i].set_title(f"Spike histogram — {labels[i]}")
+        axes[1, i].plot(times[0], peak_map0[i], color="darkorange", linewidth=0.9)
+        axes[1, i].axhline(0, color="k", linewidth=0.4, alpha=0.4)
+        axes[1, i].set_title(f"Peak map — {labels[i]}")
     plt.tight_layout()
     plt.show()
