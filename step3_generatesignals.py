@@ -96,6 +96,7 @@ class UNet1D(nn.Module):
     """
     Input channels: 3 (signal) + 3 (peak_map) + 3 (mean) + 3 (std) + 3 (kurtosis) = 15
     Output channels: 3 (predicted x_0)
+    Peak map is also injected additively at each encoder scale for temporal control.
     """
     def __init__(self, in_channels=15, out_channels=3, base_channels=64, embed_dim=64):
         super().__init__()
@@ -104,37 +105,34 @@ class UNet1D(nn.Module):
         self.sigma_emb = SigmaEmbedding(embed_dim)
 
         # encoder
-        self.enc1 = ResBlock1D(in_channels, C,    embed_dim)   # (B, 64,  400)
-        self.enc2 = ResBlock1D(C,           C*2,  embed_dim)   # (B, 128, 200)
-        self.enc3 = ResBlock1D(C*2,         C*4,  embed_dim)   # (B, 256, 100)
+        self.enc1 = ResBlock1D(in_channels, C,    embed_dim)
+        self.enc2 = ResBlock1D(C,           C*2,  embed_dim)
+        self.enc3 = ResBlock1D(C*2,         C*4,  embed_dim)
 
         self.down = nn.AvgPool1d(kernel_size=2, stride=2)
 
         # bottleneck
-        self.bottleneck = ResBlock1D(C*4, C*4, embed_dim)      # (B, 256, 50)
+        self.bottleneck = ResBlock1D(C*4, C*4, embed_dim)
+
+        # multi-scale peak map projections — re-inject peak_map at each encoder scale
+        # so temporal position info survives U-Net downsampling
+        self.peak_proj1 = nn.Conv1d(3, C,   kernel_size=1)
+        self.peak_proj2 = nn.Conv1d(3, C*2, kernel_size=1)
+        self.peak_proj3 = nn.Conv1d(3, C*4, kernel_size=1)
+        self.peak_projb = nn.Conv1d(3, C*4, kernel_size=1)
 
         # decoder — upsample to match skip connection size exactly
-
-        self.dec3 = ResBlock1D(C*4 + C*4, C*4, embed_dim)     # (B, 256, 100)
-        self.dec2 = ResBlock1D(C*4 + C*2, C*2, embed_dim)     # (B, 128, 200)
-        self.dec1 = ResBlock1D(C*2 + C,   C,   embed_dim)     # (B, 64,  400)
+        self.dec3 = ResBlock1D(C*4 + C*4, C*4, embed_dim)
+        self.dec2 = ResBlock1D(C*4 + C*2, C*2, embed_dim)
+        self.dec1 = ResBlock1D(C*2 + C,   C,   embed_dim)
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
     def forward(self, x, sigma, peak_map, mean, std, kurtosis):
-        # x:        (B, 3, L)
-        # sigma:    (B,)
-        # peak_map: (B, 3, L) — Gaussian bumps at top-K curvature peaks
-        # mean:     (B, 3)
-        # std:      (B, 3)
-        # kurtosis: (B, 3)
-
         B, _, L = x.shape
 
-        # apply cin preconditioning to noisy signal only — conditions are clean and must not be suppressed
         x_scaled = c_in(sigma).view(B, 1, 1) * x
 
-        # expand scalar conditions to (B, 3, L) and concatenate all
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
         kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
@@ -142,20 +140,25 @@ class UNet1D(nn.Module):
 
         sigma_emb = self.sigma_emb(sigma)  # (B, 64)
 
-        # encoder
-        e1 = self.enc1(inp,          sigma_emb)  # (B, 64,  400)
-        e2 = self.enc2(self.down(e1), sigma_emb)  # (B, 128, 200)
-        e3 = self.enc3(self.down(e2), sigma_emb)  # (B, 256, 100)
+        # encoder — inject peak_map additively at each level (re-downsampled to match)
+        e1 = self.enc1(inp, sigma_emb)
+        e1 = e1 + self.peak_proj1(peak_map)
 
-        # bottleneck
-        b = self.bottleneck(self.down(e3), sigma_emb)  # (B, 256, 50)
+        e2 = self.enc2(self.down(e1), sigma_emb)
+        e2 = e2 + self.peak_proj2(F.interpolate(peak_map, size=e2.shape[-1], mode='linear', align_corners=False))
 
-        # decoder with skip connections — upsample to exact skip size to handle odd dimensions
+        e3 = self.enc3(self.down(e2), sigma_emb)
+        e3 = e3 + self.peak_proj3(F.interpolate(peak_map, size=e3.shape[-1], mode='linear', align_corners=False))
+
+        b = self.bottleneck(self.down(e3), sigma_emb)
+        b = b + self.peak_projb(F.interpolate(peak_map, size=b.shape[-1], mode='linear', align_corners=False))
+
+        # decoder with skip connections
         d3 = self.dec3(torch.cat([F.interpolate(b,  size=e3.shape[-1], mode='nearest'), e3], dim=1), sigma_emb)
         d2 = self.dec2(torch.cat([F.interpolate(d3, size=e2.shape[-1], mode='nearest'), e2], dim=1), sigma_emb)
         d1 = self.dec1(torch.cat([F.interpolate(d2, size=e1.shape[-1], mode='nearest'), e1], dim=1), sigma_emb)
 
-        return self.out_conv(d1)  # (B, 3, 400)
+        return self.out_conv(d1)
 
 
 # ── EDM wrapper: applies preconditioning around Gϕ ───────────────────────────
@@ -215,6 +218,7 @@ def train(epochs=15000, batch_size=4, lr=1e-4):
         f.write(f"  out_channels  = 3\n")
         f.write(f"  base_channels = 64\n")
         f.write(f"  embed_dim     = 64\n")
+        f.write(f"  peak_map      = multi-scale injection (enc1/enc2/enc3/bottleneck)\n")
         f.write(f"  total params  = {n_params:,}\n\n")
         f.write("[Training]\n")
         f.write(f"  epochs        = {epochs}\n")

@@ -34,18 +34,18 @@ if device.type == "cuda":
 
 class DVLDataset(Dataset):
     def __init__(self, path):
-        data              = np.load(path)
-        self.signals      = torch.tensor(data["signals"],     dtype=torch.float32)  # (W, 3, N)
-        self.spike_hists  = torch.tensor(data["spike_hists"], dtype=torch.float32)  # (W, 3, N_BINS)
-        self.means        = torch.tensor(data["means"],       dtype=torch.float32)  # (W, 3)
-        self.stds         = torch.tensor(data["stds"],        dtype=torch.float32)  # (W, 3)
-        self.kurtoses     = torch.tensor(data["kurtoses"],    dtype=torch.float32)  # (W, 3)
+        data             = np.load(path)
+        self.signals     = torch.tensor(data["signals"],   dtype=torch.float32)  # (W, 3, N)
+        self.peak_maps   = torch.tensor(data["peak_maps"], dtype=torch.float32)  # (W, 3, N)
+        self.means       = torch.tensor(data["means"],     dtype=torch.float32)  # (W, 3)
+        self.stds        = torch.tensor(data["stds"],      dtype=torch.float32)  # (W, 3)
+        self.kurtoses    = torch.tensor(data["kurtoses"],  dtype=torch.float32)  # (W, 3)
 
     def __len__(self):
         return len(self.signals)
 
     def __getitem__(self, idx):
-        return self.signals[idx], self.spike_hists[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
+        return self.signals[idx], self.peak_maps[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
 
 
 # ── EDM preconditioning constants ─────────────────────────────────────────────
@@ -53,7 +53,6 @@ class DVLDataset(Dataset):
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
 SIGMA_DATA = 1.0
-N_BINS     = 20   # bins in spike histogram conditioning
 
 
 def c_skip(sigma):
@@ -124,31 +123,42 @@ class UNet1D(nn.Module):
 
         self.bottleneck = ResBlock1D(C*4, C*4, embed_dim)
 
+        # multi-scale peak map projections — re-inject peak_map at each encoder scale
+        self.peak_proj1 = nn.Conv1d(3, C,   kernel_size=1)
+        self.peak_proj2 = nn.Conv1d(3, C*2, kernel_size=1)
+        self.peak_proj3 = nn.Conv1d(3, C*4, kernel_size=1)
+        self.peak_projb = nn.Conv1d(3, C*4, kernel_size=1)
+
         self.dec3 = ResBlock1D(C*4 + C*4, C*4, embed_dim)
         self.dec2 = ResBlock1D(C*4 + C*2, C*2, embed_dim)
         self.dec1 = ResBlock1D(C*2 + C,   C,   embed_dim)
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
-    def forward(self, x, sigma, spike_hist, mean, std, kurtosis):
+    def forward(self, x, sigma, peak_map, mean, std, kurtosis):
         B, _, L = x.shape
 
         x_scaled = c_in(sigma).view(B, 1, 1) * x
 
-        spike_interp = F.interpolate(spike_hist, size=L, mode='linear', align_corners=False)  # (B, 3, L)
-
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
         kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
-        inp = torch.cat([x_scaled, spike_interp, mean_exp, std_exp, kurt_exp], dim=1)
+        inp = torch.cat([x_scaled, peak_map, mean_exp, std_exp, kurt_exp], dim=1)
 
         sigma_emb = self.sigma_emb(sigma)
 
-        e1 = self.enc1(inp,           sigma_emb)
+        # encoder — inject peak_map additively at each level
+        e1 = self.enc1(inp, sigma_emb)
+        e1 = e1 + self.peak_proj1(peak_map)
+
         e2 = self.enc2(self.down(e1), sigma_emb)
+        e2 = e2 + self.peak_proj2(F.interpolate(peak_map, size=e2.shape[-1], mode='linear', align_corners=False))
+
         e3 = self.enc3(self.down(e2), sigma_emb)
+        e3 = e3 + self.peak_proj3(F.interpolate(peak_map, size=e3.shape[-1], mode='linear', align_corners=False))
 
         b = self.bottleneck(self.down(e3), sigma_emb)
+        b = b + self.peak_projb(F.interpolate(peak_map, size=b.shape[-1], mode='linear', align_corners=False))
 
         d3 = self.dec3(torch.cat([F.interpolate(b,  size=e3.shape[-1], mode='nearest'), e3], dim=1), sigma_emb)
         d2 = self.dec2(torch.cat([F.interpolate(d3, size=e2.shape[-1], mode='nearest'), e2], dim=1), sigma_emb)
@@ -164,10 +174,10 @@ class EDMModel(nn.Module):
         super().__init__()
         self.net = UNet1D()
 
-    def forward(self, x_noisy, sigma, spike_hist, mean, std, kurtosis):
+    def forward(self, x_noisy, sigma, peak_map, mean, std, kurtosis):
         skip  = c_skip(sigma).view(-1, 1, 1) * x_noisy
         scale = c_out(sigma).view(-1, 1, 1)
-        net_out = self.net(x_noisy, sigma, spike_hist, mean, std, kurtosis)
+        net_out = self.net(x_noisy, sigma, peak_map, mean, std, kurtosis)
         return skip + scale * net_out
 
 
@@ -204,10 +214,11 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  P_mean      = -1.2\n")
         f.write(f"  P_std       =  1.2\n\n")
         f.write("[Model architecture]\n")
-        f.write(f"  in_channels   = 15  (3 signal + 3 spike_hist + 3 mean + 3 std + 3 kurtosis)\n")
+        f.write(f"  in_channels   = 15  (3 signal + 3 peak_map + 3 mean + 3 std + 3 kurtosis)\n")
         f.write(f"  out_channels  = 3\n")
         f.write(f"  base_channels = 64\n")
         f.write(f"  embed_dim     = 64\n")
+        f.write(f"  peak_map      = multi-scale injection (enc1/enc2/enc3/bottleneck)\n")
         f.write(f"  total params  = {n_params:,}\n\n")
         f.write("[Training]\n")
         f.write(f"  epochs        = {epochs}\n")
@@ -221,7 +232,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
         f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
-        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n\n")
+        f.write(f"  conditions    = peak_map (K=3 peaks, sigma=10), mean, std, kurtosis\n\n")
         f.write(f"[Files]\n")
         f.write(f"  model         = {model_path}\n")
         f.write(f"  log           = {log_path}\n\n")
@@ -231,12 +242,12 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
     losses = []
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
-        for signals, spike_hists, means, stds, kurtoses in dataloader:
-            signals     = signals.to(device)
-            spike_hists = spike_hists.to(device)
-            means       = means.to(device)
-            stds        = stds.to(device)
-            kurtoses    = kurtoses.to(device)
+        for signals, peak_maps, means, stds, kurtoses in dataloader:
+            signals   = signals.to(device)
+            peak_maps = peak_maps.to(device)
+            means     = means.to(device)
+            stds      = stds.to(device)
+            kurtoses  = kurtoses.to(device)
             B = len(signals)
 
             sigma   = sample_sigma(B, device)
@@ -247,7 +258,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
             co     = c_out(sigma).view(B, 1, 1)
             target = (signals - cs * z) / co
 
-            x_hat = model(z, sigma, spike_hists, means, stds, kurtoses)
+            x_hat = model(z, sigma, peak_maps, means, stds, kurtoses)
 
             w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()

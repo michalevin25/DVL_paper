@@ -168,95 +168,95 @@ peak_two   = make_peak_map([40, 155], [2.0, 2.0])
 peak_heavy = make_peak_map([40, 103, 155], [2.0, 1.5, 2.0])
 
 # ── Test 1: designed peak maps ────────────────────────────────────────────────
-# scenarios = [
-#     (peak_none,  "no maneuvers"),
-#     (peak_early, "early maneuver (~t=30)"),
-#     (peak_mid,   "mid maneuver (~t=103)"),
-#     (peak_late,  "late maneuver (~t=175)"),
-#     (peak_two,   "two maneuvers (~t=40, 155)"),
-#     (peak_heavy, "three maneuvers"),
-# ]
-# fig, axes = plt.subplots(3, len(scenarios), figsize=(22, 8), sharex=True)
-# for col, (pm, title) in enumerate(scenarios):
-#     gen = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
-#     for row in range(3):
-#         axes[row, col].plot(gen[row].numpy(), color="steelblue", linewidth=0.9)
-#         axes[row, col].grid(True, alpha=0.3)
-#         if col == 0:
-#             axes[row, col].set_ylabel(vel_labels[row])
-#     axes[0, col].set_title(title, fontsize=8)
-# fig.suptitle("Test 1: designed peak maps — maneuver timing control")
-# plt.tight_layout()
-# plt.show()
+scenarios = [
+    (peak_none,  "no maneuvers"),
+    (peak_early, "early maneuver (~t=30)"),
+    (peak_mid,   "mid maneuver (~t=103)"),
+    (peak_late,  "late maneuver (~t=175)"),
+    (peak_two,   "two maneuvers (~t=40, 155)"),
+    (peak_heavy, "three maneuvers"),
+]
+fig, axes = plt.subplots(3, len(scenarios), figsize=(22, 8), sharex=True)
+for col, (pm, title) in enumerate(scenarios):
+    gen = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
+    for row in range(3):
+        axes[row, col].plot(gen[row].numpy(), color="steelblue", linewidth=0.9)
+        axes[row, col].grid(True, alpha=0.3)
+        if col == 0:
+            axes[row, col].set_ylabel(vel_labels[row])
+    axes[0, col].set_title(title, fontsize=8)
+fig.suptitle("Test 1: designed peak maps — maneuver timing control")
+plt.tight_layout()
+plt.show()
 
 
 # ── Test 2: same peak map, different seeds ────────────────────────────────────
-# seeds  = [0, 42, 123, 999, 2024]
-# colors = ["steelblue", "darkorange", "green", "purple", "brown"]
-# fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
-# for i in range(3):
-#     for j, seed in enumerate(seeds):
-#         gen = generate(peak_two, mean_syn, std_syn, kurt_syn, signal_length=N, seed=seed)
-#         axes[i].plot(gen[i].numpy(), label=f"seed={seed}", color=colors[j], linewidth=0.9, alpha=0.8)
-#     axes[i].set_ylabel(vel_labels[i])
-#     axes[i].legend(fontsize=7, ncol=5)
-#     axes[i].grid(True, alpha=0.3)
-# fig.suptitle("Test 2: same conditions (two maneuvers), 5 different seeds — diversity check")
-# plt.tight_layout()
-# plt.show()
+seeds  = [0, 42, 123, 999, 2024]
+colors = ["steelblue", "darkorange", "green", "purple", "brown"]
+fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+for i in range(3):
+    for j, seed in enumerate(seeds):
+        gen = generate(peak_two, mean_syn, std_syn, kurt_syn, signal_length=N, seed=seed)
+        axes[i].plot(gen[i].numpy(), label=f"seed={seed}", color=colors[j], linewidth=0.9, alpha=0.8)
+    axes[i].set_ylabel(vel_labels[i])
+    axes[i].legend(fontsize=7, ncol=5)
+    axes[i].grid(True, alpha=0.3)
+fig.suptitle("Test 2: same conditions (two maneuvers), 5 different seeds — diversity check")
+plt.tight_layout()
+plt.show()
 
 
 # ── Test 3: real peak map vs empty peak map ───────────────────────────────────
-# compare_indices = [0, 15, 30]
-# fig, axes = plt.subplots(3, len(compare_indices) * 2, figsize=(22, 8), sharex=True)
-# for col, idx in enumerate(compare_indices):
-#     pm_real  = peak_maps[idx].unsqueeze(0)
-#     pm_empty = make_peak_map([], [])
-#     mean_t   = means[idx].unsqueeze(0)
-#     std_t    = stds[idx].unsqueeze(0)
-#     kurt_t   = kurtoses[idx].unsqueeze(0)
-#     gen_real  = generate(pm_real,  mean_t, std_t, kurt_t, signal_length=N, seed=42)
-#     gen_empty = generate(pm_empty, mean_t, std_t, kurt_t, signal_length=N, seed=42)
-#     for row in range(3):
-#         axes[row, col * 2].plot(gen_real[row].numpy(),  color="steelblue",  linewidth=0.9)
-#         axes[row, col * 2 + 1].plot(gen_empty[row].numpy(), color="darkorange", linewidth=0.9)
-#         axes[row, col * 2].grid(True, alpha=0.3)
-#         axes[row, col * 2 + 1].grid(True, alpha=0.3)
-#         if col == 0:
-#             axes[row, col * 2].set_ylabel(vel_labels[row])
-#     axes[0, col * 2].set_title(f"win {idx} — real peaks", fontsize=8)
-#     axes[0, col * 2 + 1].set_title(f"win {idx} — no maneuvers", fontsize=8)
-# fig.suptitle("Test 3: real peak map vs empty peak map (same stats)")
-# plt.tight_layout()
-# plt.show()
+compare_indices = [0, 15, 30]
+fig, axes = plt.subplots(3, len(compare_indices) * 2, figsize=(22, 8), sharex=True)
+for col, idx in enumerate(compare_indices):
+    pm_real  = peak_maps[idx].unsqueeze(0)
+    pm_empty = make_peak_map([], [])
+    mean_t   = means[idx].unsqueeze(0)
+    std_t    = stds[idx].unsqueeze(0)
+    kurt_t   = kurtoses[idx].unsqueeze(0)
+    gen_real  = generate(pm_real,  mean_t, std_t, kurt_t, signal_length=N, seed=42)
+    gen_empty = generate(pm_empty, mean_t, std_t, kurt_t, signal_length=N, seed=42)
+    for row in range(3):
+        axes[row, col * 2].plot(gen_real[row].numpy(),  color="steelblue",  linewidth=0.9)
+        axes[row, col * 2 + 1].plot(gen_empty[row].numpy(), color="darkorange", linewidth=0.9)
+        axes[row, col * 2].grid(True, alpha=0.3)
+        axes[row, col * 2 + 1].grid(True, alpha=0.3)
+        if col == 0:
+            axes[row, col * 2].set_ylabel(vel_labels[row])
+    axes[0, col * 2].set_title(f"win {idx} — real peaks", fontsize=8)
+    axes[0, col * 2 + 1].set_title(f"win {idx} — no maneuvers", fontsize=8)
+fig.suptitle("Test 3: real peak map vs empty peak map (same stats)")
+plt.tight_layout()
+plt.show()
 
 
 # ── Test 4: unseen trajectories 12 and 13 ────────────────────────────────────
-# for test_traj in [12, 13]:
-#     test_mask    = np.where(traj_ids == test_traj)[0]
-#     test_win_idx = test_mask[len(test_mask) // 2]
-#     pm_test   = peak_maps[test_win_idx].unsqueeze(0)
-#     mean_test = means[test_win_idx].unsqueeze(0)
-#     std_test  = stds[test_win_idx].unsqueeze(0)
-#     kurt_test = kurtoses[test_win_idx].unsqueeze(0)
-#     real_test = signals[test_win_idx]
-#     gen_test = generate(pm_test, mean_test, std_test, kurt_test, signal_length=N, seed=42)
-#     fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
-#     for i in range(3):
-#         axes[i].plot(real_test[i].numpy(), label="real (unseen)", color="red",       linewidth=1.4)
-#         axes[i].plot(gen_test[i].numpy(),  label="generated",     color="steelblue", linewidth=1.0)
-#         axes[i].set_ylabel(vel_labels[i])
-#         axes[i].legend(fontsize=8)
-#         axes[i].grid(True, alpha=0.3)
-#     fig.suptitle(f"Test 4: unseen trajectory {test_traj} — real vs generated")
-#     plt.tight_layout()
-#     plt.show()
-#     plot_3d_trajectory(
-#         [real_test, gen_test],
-#         ["real (unseen)", "generated"],
-#         ["red", "steelblue"],
-#         f"3D trajectory — unseen trajectory {test_traj}  (real vs generated)"
-#     )
+for test_traj in [12, 13]:
+    test_mask    = np.where(traj_ids == test_traj)[0]
+    test_win_idx = test_mask[len(test_mask) // 2]
+    pm_test   = peak_maps[test_win_idx].unsqueeze(0)
+    mean_test = means[test_win_idx].unsqueeze(0)
+    std_test  = stds[test_win_idx].unsqueeze(0)
+    kurt_test = kurtoses[test_win_idx].unsqueeze(0)
+    real_test = signals[test_win_idx]
+    gen_test = generate(pm_test, mean_test, std_test, kurt_test, signal_length=N, seed=42)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
+    for i in range(3):
+        axes[i].plot(real_test[i].numpy(), label="real (unseen)", color="red",       linewidth=1.4)
+        axes[i].plot(gen_test[i].numpy(),  label="generated",     color="steelblue", linewidth=1.0)
+        axes[i].set_ylabel(vel_labels[i])
+        axes[i].legend(fontsize=8)
+        axes[i].grid(True, alpha=0.3)
+    fig.suptitle(f"Test 4: unseen trajectory {test_traj} — real vs generated")
+    plt.tight_layout()
+    plt.show()
+    plot_3d_trajectory(
+        [real_test, gen_test],
+        ["real (unseen)", "generated"],
+        ["red", "steelblue"],
+        f"3D trajectory — unseen trajectory {test_traj}  (real vs generated)"
+    )
 
 
 # ── Denoising visualisation ───────────────────────────────────────────────────
@@ -274,120 +274,118 @@ def window_stats(sig_tensor):
 
 
 # ── Evaluation 1: Statistical fidelity ───────────────────────────────────────
-# real_m, real_s, real_k = [], [], []
-# gen_m,  gen_s,  gen_k  = [], [], []
-# is_test_flag            = []
-# print("Evaluation 1: statistical fidelity — generating for all windows...")
-# for idx in range(len(signals)):
-#     hi = spike_hists[idx].unsqueeze(0)
-#     mi = means[idx].unsqueeze(0)
-#     si = stds[idx].unsqueeze(0)
-#     ki = kurtoses[idx].unsqueeze(0)
-#     real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
-#     rm, rs, rk  = window_stats(real_denorm)
-#     gen_i       = generate(hi, mi, si, ki, signal_length=N, seed=42)
-#     gm, gs, gk  = window_stats(gen_i)
-#     real_m.extend(rm);  real_s.extend(rs);  real_k.extend(rk)
-#     gen_m.extend(gm);   gen_s.extend(gs);   gen_k.extend(gk)
-#     is_test_flag.extend([traj_ids[idx] >= 12] * 3)
-# real_m, real_s, real_k = np.array(real_m), np.array(real_s), np.array(real_k)
-# gen_m,  gen_s,  gen_k  = np.array(gen_m),  np.array(gen_s),  np.array(gen_k)
-# is_test_flag            = np.array(is_test_flag)
-# fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-# stat_pairs = [(real_m, gen_m, "mean"), (real_s, gen_s, "std"), (real_k, gen_k, "kurtosis")]
-# for ax, (real, gen, label) in zip(axes, stat_pairs):
-#     tr = ~is_test_flag; te = is_test_flag
-#     ax.scatter(real[tr], gen[tr], color="steelblue", alpha=0.7, s=30, label="train")
-#     ax.scatter(real[te], gen[te], color="red",       alpha=0.9, s=60, label="test", zorder=5)
-#     lo = min(real.min(), gen.min()); hi = max(real.max(), gen.max())
-#     ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, alpha=0.5)
-#     r, _ = scipy_stats.pearsonr(real, gen)
-#     ax.text(0.05, 0.92, f"r = {r:.3f}", transform=ax.transAxes, fontsize=9)
-#     ax.set_xlabel(f"real {label}"); ax.set_ylabel(f"generated {label}")
-#     ax.set_title(label); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
-# fig.suptitle("Evaluation 1: statistical fidelity")
-# plt.tight_layout(); plt.show()
+real_m, real_s, real_k = [], [], []
+gen_m,  gen_s,  gen_k  = [], [], []
+is_test_flag            = []
+print("Evaluation 1: statistical fidelity — generating for all windows...")
+for idx in range(len(signals)):
+    hi = peak_maps[idx].unsqueeze(0)
+    mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0)
+    ki = kurtoses[idx].unsqueeze(0)
+    real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
+    rm, rs, rk  = window_stats(real_denorm)
+    gen_i       = generate(hi, mi, si, ki, signal_length=N, seed=42)
+    gm, gs, gk  = window_stats(gen_i)
+    real_m.extend(rm);  real_s.extend(rs);  real_k.extend(rk)
+    gen_m.extend(gm);   gen_s.extend(gs);   gen_k.extend(gk)
+    is_test_flag.extend([traj_ids[idx] >= 12] * 3)
+real_m, real_s, real_k = np.array(real_m), np.array(real_s), np.array(real_k)
+gen_m,  gen_s,  gen_k  = np.array(gen_m),  np.array(gen_s),  np.array(gen_k)
+is_test_flag            = np.array(is_test_flag)
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+stat_pairs = [(real_m, gen_m, "mean"), (real_s, gen_s, "std"), (real_k, gen_k, "kurtosis")]
+for ax, (real, gen, label) in zip(axes, stat_pairs):
+    tr = ~is_test_flag; te = is_test_flag
+    ax.scatter(real[tr], gen[tr], color="steelblue", alpha=0.7, s=30, label="train")
+    ax.scatter(real[te], gen[te], color="red",       alpha=0.9, s=60, label="test", zorder=5)
+    lo = min(real.min(), gen.min()); hi = max(real.max(), gen.max())
+    ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, alpha=0.5)
+    r, _ = scipy_stats.pearsonr(real, gen)
+    ax.text(0.05, 0.92, f"r = {r:.3f}", transform=ax.transAxes, fontsize=9)
+    ax.set_xlabel(f"real {label}"); ax.set_ylabel(f"generated {label}")
+    ax.set_title(label); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+fig.suptitle("Evaluation 1: statistical fidelity")
+plt.tight_layout(); plt.show()
 
 
 # ── Evaluation 2: Power spectral density ─────────────────────────────────────
-# test_indices = np.where(traj_ids >= 12)[0]
-# nperseg      = min(64, N)
-# real_psds, gen_psds = [], []
-# print("Evaluation 2: power spectral density...")
-# for idx in test_indices:
-#     hi = spike_hists[idx].unsqueeze(0); mi = means[idx].unsqueeze(0)
-#     si = stds[idx].unsqueeze(0);        ki = kurtoses[idx].unsqueeze(0)
-#     gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
-#     real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
-#     for ax in range(3):
-#         freqs, Pr = welch(real_denorm[ax].numpy(), nperseg=nperseg)
-#         _,     Pg = welch(gen_i[ax].numpy(),       nperseg=nperseg)
-#         real_psds.append(Pr); gen_psds.append(Pg)
-# real_psds = np.array(real_psds); gen_psds = np.array(gen_psds)
-# fig, ax = plt.subplots(figsize=(10, 5))
-# ax.semilogy(freqs, real_psds.mean(axis=0), color="red",      linewidth=1.5, label="real")
-# ax.fill_between(freqs, real_psds.mean(axis=0)-real_psds.std(axis=0),
-#                        real_psds.mean(axis=0)+real_psds.std(axis=0), color="red", alpha=0.15)
-# ax.semilogy(freqs, gen_psds.mean(axis=0),  color="steelblue",linewidth=1.5, label="generated")
-# ax.fill_between(freqs, gen_psds.mean(axis=0)-gen_psds.std(axis=0),
-#                        gen_psds.mean(axis=0)+gen_psds.std(axis=0), color="steelblue", alpha=0.15)
-# ax.set_xlabel("Frequency (normalized)"); ax.set_ylabel("Power")
-# ax.set_title("Evaluation 2: power spectral density"); ax.legend(); ax.grid(True, alpha=0.3)
-# plt.tight_layout(); plt.show()
+test_indices = np.where(traj_ids >= 12)[0]
+nperseg      = min(64, N)
+real_psds, gen_psds = [], []
+print("Evaluation 2: power spectral density...")
+for idx in test_indices:
+    hi = peak_maps[idx].unsqueeze(0); mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0);      ki = kurtoses[idx].unsqueeze(0)
+    gen_i = generate(hi, mi, si, ki, signal_length=N, seed=42)
+    real_denorm = signals[idx] * stds[idx].unsqueeze(1) + means[idx].unsqueeze(1)
+    for ax in range(3):
+        freqs, Pr = welch(real_denorm[ax].numpy(), nperseg=nperseg)
+        _,     Pg = welch(gen_i[ax].numpy(),       nperseg=nperseg)
+        real_psds.append(Pr); gen_psds.append(Pg)
+real_psds = np.array(real_psds); gen_psds = np.array(gen_psds)
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.semilogy(freqs, real_psds.mean(axis=0), color="red",       linewidth=1.5, label="real")
+ax.fill_between(freqs, real_psds.mean(axis=0)-real_psds.std(axis=0),
+                       real_psds.mean(axis=0)+real_psds.std(axis=0), color="red", alpha=0.15)
+ax.semilogy(freqs, gen_psds.mean(axis=0),  color="steelblue", linewidth=1.5, label="generated")
+ax.fill_between(freqs, gen_psds.mean(axis=0)-gen_psds.std(axis=0),
+                       gen_psds.mean(axis=0)+gen_psds.std(axis=0), color="steelblue", alpha=0.15)
+ax.set_xlabel("Frequency (normalized)"); ax.set_ylabel("Power")
+ax.set_title("Evaluation 2: power spectral density"); ax.legend(); ax.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
 
 
 # ── Evaluation 3: Diversity ───────────────────────────────────────────────────
-# test_indices = np.where(traj_ids >= 12)[0]
-# div_seeds  = [0, 42, 123, 999, 2024]
-# div_colors = ["steelblue", "darkorange", "green", "purple", "brown"]
-# print("Evaluation 3: diversity...")
-# for idx in test_indices[:2]:
-#     hi = spike_hists[idx].unsqueeze(0); mi = means[idx].unsqueeze(0)
-#     si = stds[idx].unsqueeze(0);        ki = kurtoses[idx].unsqueeze(0)
-#     samples = np.stack([generate(hi, mi, si, ki, signal_length=N, seed=s).numpy() for s in div_seeds])
-#     smean = samples.mean(axis=0); sstd = samples.std(axis=0); t = np.arange(N)
-#     fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
-#     for ax_i in range(3):
-#         axes[ax_i].plot(signals[idx, ax_i].numpy(), color="red", linewidth=1.4, label="real", zorder=10)
-#         for j, (s, c) in enumerate(zip(samples, div_colors)):
-#             axes[ax_i].plot(s[ax_i], color=c, linewidth=0.8, alpha=0.55, label=f"seed {div_seeds[j]}")
-#         axes[ax_i].fill_between(t, smean[ax_i]-sstd[ax_i], smean[ax_i]+sstd[ax_i],
-#                                 color="steelblue", alpha=0.18, label="±1 std")
-#         axes[ax_i].set_ylabel(vel_labels[ax_i]); axes[ax_i].legend(fontsize=7, ncol=4)
-#         axes[ax_i].grid(True, alpha=0.3)
-#     pairwise = [np.sqrt(np.mean((samples[i]-samples[j])**2))
-#                 for i in range(len(samples)) for j in range(i+1, len(samples))]
-#     fig.suptitle(f"Evaluation 3: diversity — trajectory {traj_ids[idx]}, window {idx} — "
-#                  f"5 seeds  (mean pairwise RMS = {np.mean(pairwise):.4f})")
-#     plt.tight_layout(); plt.show()
+test_indices = np.where(traj_ids >= 12)[0]
+div_seeds  = [0, 42, 123, 999, 2024]
+div_colors = ["steelblue", "darkorange", "green", "purple", "brown"]
+print("Evaluation 3: diversity...")
+for idx in test_indices[:2]:
+    hi = peak_maps[idx].unsqueeze(0); mi = means[idx].unsqueeze(0)
+    si = stds[idx].unsqueeze(0);      ki = kurtoses[idx].unsqueeze(0)
+    samples = np.stack([generate(hi, mi, si, ki, signal_length=N, seed=s).numpy() for s in div_seeds])
+    smean = samples.mean(axis=0); sstd = samples.std(axis=0); t = np.arange(N)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 7), sharex=True)
+    for ax_i in range(3):
+        axes[ax_i].plot(signals[idx, ax_i].numpy(), color="red", linewidth=1.4, label="real", zorder=10)
+        for j, (s, c) in enumerate(zip(samples, div_colors)):
+            axes[ax_i].plot(s[ax_i], color=c, linewidth=0.8, alpha=0.55, label=f"seed {div_seeds[j]}")
+        axes[ax_i].fill_between(t, smean[ax_i]-sstd[ax_i], smean[ax_i]+sstd[ax_i],
+                                color="steelblue", alpha=0.18, label="±1 std")
+        axes[ax_i].set_ylabel(vel_labels[ax_i]); axes[ax_i].legend(fontsize=7, ncol=4)
+        axes[ax_i].grid(True, alpha=0.3)
+    pairwise = [np.sqrt(np.mean((samples[i]-samples[j])**2))
+                for i in range(len(samples)) for j in range(i+1, len(samples))]
+    fig.suptitle(f"Evaluation 3: diversity — trajectory {traj_ids[idx]}, window {idx} — "
+                 f"5 seeds  (mean pairwise RMS = {np.mean(pairwise):.4f})")
+    plt.tight_layout(); plt.show()
 
 
 # ── Evaluation 4: Controllability ────────────────────────────────────────────
-# ctrl_scenarios = [
-#     (peak_none,  "no maneuvers"), (peak_early, "early (~t=30)"),
-#     (peak_mid,   "mid (~t=103)"), (peak_late,  "late (~t=175)"),
-#     (peak_two,   "two maneuvers"),
-# ]
-# N_BINS_EVAL = 20
-# print("Evaluation 4: controllability...")
-# fig, axes = plt.subplots(2, len(ctrl_scenarios), figsize=(20, 6))
-# bin_edges   = np.linspace(0, N, N_BINS_EVAL + 1, dtype=int)
-# bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-# for col, (pm, title) in enumerate(ctrl_scenarios):
-#     gen    = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
-#     gen_np = gen.numpy()
-#     pm_np  = pm[0].numpy().mean(axis=0)
-#     gen_rms = np.array([np.sqrt(np.mean(gen_np[:, bin_edges[b]:bin_edges[b+1]]**2)) for b in range(N_BINS_EVAL)])
-#     axes[0, col].plot(pm_np, color="darkorange", linewidth=0.9)
-#     axes[0, col].set_title(title, fontsize=8)
-#     if col == 0: axes[0, col].set_ylabel("input peak map")
-#     axes[1, col].bar(bin_centers, gen_rms, width=N/N_BINS_EVAL*0.8, color="steelblue", alpha=0.8)
-#     axes[1, col].set_ylim(0, None)
-#     if col == 0: axes[1, col].set_ylabel("generated signal RMS")
-# fig.suptitle("Evaluation 4: controllability — input peak map vs generated signal energy per bin")
-# plt.tight_layout(); plt.show()
-
-print("Evaluations 1–4 commented out.")
+ctrl_scenarios = [
+    (peak_none,  "no maneuvers"), (peak_early, "early (~t=30)"),
+    (peak_mid,   "mid (~t=103)"), (peak_late,  "late (~t=175)"),
+    (peak_two,   "two maneuvers"),
+]
+N_BINS_EVAL = 20
+print("Evaluation 4: controllability...")
+fig, axes = plt.subplots(2, len(ctrl_scenarios), figsize=(20, 6))
+bin_edges   = np.linspace(0, N, N_BINS_EVAL + 1, dtype=int)
+bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+for col, (pm, title) in enumerate(ctrl_scenarios):
+    gen    = generate(pm, mean_syn, std_syn, kurt_syn, signal_length=N, seed=42)
+    gen_np = gen.numpy()
+    pm_np  = pm[0].numpy().mean(axis=0)
+    gen_rms = np.array([np.sqrt(np.mean(gen_np[:, bin_edges[b]:bin_edges[b+1]]**2)) for b in range(N_BINS_EVAL)])
+    axes[0, col].plot(pm_np, color="darkorange", linewidth=0.9)
+    axes[0, col].set_title(title, fontsize=8)
+    if col == 0: axes[0, col].set_ylabel("input peak map")
+    axes[1, col].bar(bin_centers, gen_rms, width=N/N_BINS_EVAL*0.8, color="steelblue", alpha=0.8)
+    axes[1, col].set_ylim(0, None)
+    if col == 0: axes[1, col].set_ylabel("generated signal RMS")
+fig.suptitle("Evaluation 4: controllability — input peak map vs generated signal energy per bin")
+plt.tight_layout(); plt.show()
 
 
 # ── Evaluation 5: condition ablation ─────────────────────────────────────────
