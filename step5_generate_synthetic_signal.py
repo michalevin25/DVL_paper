@@ -125,18 +125,18 @@ def make_peak_map(peak_times, amplitudes, signal_length=SIGNAL_LENGTH, sigma=PEA
 TRAJECTORIES = [
     # ── id  description                          mean(vx,vy,vz)            std(vx,vy,vz)        kurt(vx,vy,vz)        peak_times   amplitudes
     dict(id=1,  desc="Forward cruise, Gaussian",           mean=[+0.331,-0.103,+0.069], std=[0.804,0.956,0.782], kurt=[+0.44,-0.67,-0.06], peak_times=[],         amps=[],              peak_label="none"),
-    dict(id=2,  desc="Lateral + backward-vz, smooth",      mean=[+0.029,+0.199,-0.185], std=[0.716,0.614,0.867], kurt=[+1.60,-0.95,-0.21], peak_times=[],         amps=[],              peak_label="none"),
+    dict(id=2,  desc="Lateral + backward-vz, smooth",      mean=[+0.029,+0.199,-0.185], std=[0.716,0.614,0.867], kurt=[+1.60,-0.95,+3.00], peak_times=[],         amps=[],              peak_label="none"),
     dict(id=3,  desc="Backward-lateral, spiky vz, early",  mean=[-0.455,+0.310,-0.082], std=[1.015,1.013,1.035], kurt=[+0.34,+1.59,+16.68],peak_times=[40],       amps=[2.0],           peak_label="early(t=40)"),
     dict(id=4,  desc="Near-hover, explosive all axes",     mean=[+0.012,+0.048,+0.000], std=[0.562,0.716,0.786], kurt=[+22.83,+10.12,+10.92],peak_times=[40],     amps=[2.0],           peak_label="early(t=40)"),
     dict(id=5,  desc="High-speed forward, spiky vx",       mean=[+0.331,-0.103,+0.069], std=[1.006,0.983,0.981], kurt=[+14.01,+0.30,-0.39], peak_times=[103],      amps=[2.0],           peak_label="mid(t=103)"),
     dict(id=6,  desc="Backward, mild, smooth",             mean=[-0.286,-0.057,-0.083], std=[0.716,0.614,0.867], kurt=[+0.25,+3.16,+2.49],  peak_times=[],         amps=[],              peak_label="none"),
     dict(id=7,  desc="Forward-starboard, spiky vx, late",  mean=[+0.398,+0.133,+0.023], std=[0.949,1.003,0.780], kurt=[+11.63,+0.04,+4.97], peak_times=[165],      amps=[2.0],           peak_label="late(t=165)"),
-    dict(id=8,  desc="Port drift, two maneuvers",          mean=[+0.012,-0.296,-0.067], std=[0.803,1.102,1.119], kurt=[+3.78,+1.37,-0.04],  peak_times=[40,165],   amps=[2.0,2.0],       peak_label="two(t=40,165)"),
-    dict(id=9,  desc="Slow creep, low variability, late",  mean=[-0.095,+0.171,+0.015], std=[0.567,0.846,0.678], kurt=[+1.60,-0.95,-0.21],  peak_times=[165],      amps=[2.0],           peak_label="late(t=165)"),
+    dict(id=8,  desc="Port drift, two maneuvers",          mean=[+0.012,-0.296,-0.067], std=[0.803,0.880,0.900], kurt=[+3.78,+1.37,-0.04],  peak_times=[40,165],   amps=[2.0,2.0],       peak_label="two(t=40,165)"),
+    dict(id=9,  desc="Slow creep, low variability, late",  mean=[-0.095,+0.171,+0.015], std=[0.567,0.680,0.678], kurt=[+1.60,-0.95,-0.21],  peak_times=[165],      amps=[2.0],           peak_label="late(t=165)"),
     dict(id=10, desc="Backward-vz, spiky vz, mid+late",    mean=[+0.029,+0.199,-0.185], std=[0.863,0.670,0.931], kurt=[-0.60,+0.21,+9.11],  peak_times=[103,165],  amps=[2.0,2.0],       peak_label="two(t=103,165)"),
     dict(id=11, desc="Lateral, very spiky, three turns",   mean=[+0.044,+0.266,-0.005], std=[0.957,0.780,1.047], kurt=[+11.77,+9.17,+34.29], peak_times=[35,103,170],amps=[2.0,1.5,2.0], peak_label="three(t=35,103,170)"),
     dict(id=12, desc="Forward, spiky vz, mid maneuver",    mean=[+0.169,-0.069,+0.078], std=[0.917,1.052,1.067], kurt=[-0.26,+1.08,+12.33], peak_times=[103],      amps=[2.0],           peak_label="mid(t=103)"),
-    dict(id=13, desc="Near-hover, spiky vx, three turns",  mean=[-0.073,+0.051,-0.026], std=[0.616,0.958,1.057], kurt=[+11.63,+0.04,+4.97], peak_times=[35,103,170],amps=[2.0,1.5,2.0], peak_label="three(t=35,103,170)"),
+    dict(id=13, desc="Near-hover, spiky vx, three turns",  mean=[-0.073,+0.051,-0.026], std=[0.616,0.720,0.720], kurt=[+11.63,+0.04,+4.97], peak_times=[35,103,170],amps=[2.0,1.5,2.0], peak_label="three(t=35,103,170)"),
 ]
 
 
