@@ -3,7 +3,7 @@
 # Or paste the cells into a notebook manually.
 #
 # Before running: upload dvl_dataset.npz to your Google Drive under:
-#   My Drive / dvl_paper / dvl_dataset.npz
+#   My Drive / PhD / dvl paper / dvl_dataset.npz
 # Adjust DRIVE_ROOT below if you put it somewhere else.
 
 from google.colab import drive
@@ -34,26 +34,25 @@ if device.type == "cuda":
 
 class DVLDataset(Dataset):
     def __init__(self, path):
-        data              = np.load(path)
-        self.signals      = torch.tensor(data["signals"],     dtype=torch.float32)  # (W, 3, N)
-        self.spike_hists  = torch.tensor(data["spike_hists"], dtype=torch.float32)  # (W, 3, N_BINS)
-        self.means        = torch.tensor(data["means"],       dtype=torch.float32)  # (W, 3)
-        self.stds         = torch.tensor(data["stds"],        dtype=torch.float32)  # (W, 3)
-        self.kurtoses     = torch.tensor(data["kurtoses"],    dtype=torch.float32)  # (W, 3)
+        data             = np.load(path)
+        self.signals     = torch.tensor(data["signals"],   dtype=torch.float32)  # (W, 3, N)
+        self.peak_maps   = torch.tensor(data["peak_maps"], dtype=torch.float32)  # (W, 3, N)
+        self.means       = torch.tensor(data["means"],     dtype=torch.float32)  # (W, 3)
+        self.stds        = torch.tensor(data["stds"],      dtype=torch.float32)  # (W, 3)
+        self.kurtoses    = torch.tensor(data["kurtoses"],  dtype=torch.float32)  # (W, 3)
 
     def __len__(self):
         return len(self.signals)
 
     def __getitem__(self, idx):
-        return self.signals[idx], self.spike_hists[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
+        return self.signals[idx], self.peak_maps[idx], self.means[idx], self.stds[idx], self.kurtoses[idx]
 
 
 # ── EDM preconditioning constants ─────────────────────────────────────────────
 
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
-SIGMA_DATA = 1.0
-N_BINS     = 20   # bins in spike histogram conditioning
+SIGMA_DATA = 1.0  # signals are normalized to unit variance per window
 
 
 def c_skip(sigma):
@@ -72,7 +71,7 @@ def loss_weight(sigma):
     return (sigma**2 + SIGMA_DATA**2) / (sigma * SIGMA_DATA)**2
 
 
-# ── σ embedding ───────────────────────────────────────────────────────────────
+# ── σ embedding: scalar → 64-dim via small MLP ────────────────────────────────
 
 class SigmaEmbedding(nn.Module):
     def __init__(self, embed_dim=64):
@@ -84,11 +83,12 @@ class SigmaEmbedding(nn.Module):
         )
 
     def forward(self, sigma):
-        noise = c_noise(sigma).unsqueeze(-1)
-        return self.mlp(noise)
+        # sigma: (B,) → (B, embed_dim)
+        noise = c_noise(sigma).unsqueeze(-1)   # (B, 1)
+        return self.mlp(noise)                 # (B, embed_dim)
 
 
-# ── 1D ResBlock ───────────────────────────────────────────────────────────────
+# ── 1D ResBlock ────────────────────────────────────────────────────────────────
 
 class ResBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels, embed_dim=64):
@@ -98,12 +98,15 @@ class ResBlock1D(nn.Module):
         self.norm1  = nn.GroupNorm(8, out_channels)
         self.norm2  = nn.GroupNorm(8, out_channels)
         self.act    = nn.SiLU()
-        self.sigma_proj    = nn.Linear(embed_dim, out_channels)
+        self.sigma_proj = nn.Linear(embed_dim, out_channels)
+        # 1x1 conv to match channels for residual if needed
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x, sigma_emb):
+        # x: (B, in_channels, L)
+        # sigma_emb: (B, embed_dim)
         h = self.act(self.norm1(self.conv1(x)))
-        h = h + self.sigma_proj(sigma_emb).unsqueeze(-1)
+        h = h + self.sigma_proj(sigma_emb).unsqueeze(-1)  # inject σ
         h = self.act(self.norm2(self.conv2(h)))
         return h + self.residual_conv(x)
 
@@ -111,45 +114,67 @@ class ResBlock1D(nn.Module):
 # ── 1D U-Net ──────────────────────────────────────────────────────────────────
 
 class UNet1D(nn.Module):
+    """
+    Input channels: 3 (signal) + 3 (peak_map) + 3 (mean) + 3 (std) + 3 (kurtosis) = 15
+    Output channels: 3 (predicted x_0)
+    Peak map is also injected additively at each encoder scale for temporal control.
+    """
     def __init__(self, in_channels=15, out_channels=3, base_channels=64, embed_dim=64):
         super().__init__()
-        C = base_channels
+        C = base_channels  # 64
 
         self.sigma_emb = SigmaEmbedding(embed_dim)
 
-        self.enc1 = ResBlock1D(in_channels, C,   embed_dim)
-        self.enc2 = ResBlock1D(C,           C*2, embed_dim)
-        self.enc3 = ResBlock1D(C*2,         C*4, embed_dim)
+        # encoder
+        self.enc1 = ResBlock1D(in_channels, C,    embed_dim)
+        self.enc2 = ResBlock1D(C,           C*2,  embed_dim)
+        self.enc3 = ResBlock1D(C*2,         C*4,  embed_dim)
+
         self.down = nn.AvgPool1d(kernel_size=2, stride=2)
 
+        # bottleneck
         self.bottleneck = ResBlock1D(C*4, C*4, embed_dim)
 
+        # multi-scale peak map projections — re-inject peak_map at each encoder scale
+        # so temporal position info survives U-Net downsampling
+        self.peak_proj1 = nn.Conv1d(3, C,   kernel_size=1)
+        self.peak_proj2 = nn.Conv1d(3, C*2, kernel_size=1)
+        self.peak_proj3 = nn.Conv1d(3, C*4, kernel_size=1)
+        self.peak_projb = nn.Conv1d(3, C*4, kernel_size=1)
+
+        # decoder — upsample to match skip connection size exactly
         self.dec3 = ResBlock1D(C*4 + C*4, C*4, embed_dim)
         self.dec2 = ResBlock1D(C*4 + C*2, C*2, embed_dim)
         self.dec1 = ResBlock1D(C*2 + C,   C,   embed_dim)
 
         self.out_conv = nn.Conv1d(C, out_channels, kernel_size=1)
 
-    def forward(self, x, sigma, spike_hist, mean, std, kurtosis):
+    def forward(self, x, sigma, peak_map, mean, std, kurtosis):
         B, _, L = x.shape
 
         x_scaled = c_in(sigma).view(B, 1, 1) * x
 
-        spike_interp = F.interpolate(spike_hist, size=L, mode='linear', align_corners=False)  # (B, 3, L)
-
         mean_exp = mean.unsqueeze(-1).expand(B, 3, L)
         std_exp  = std.unsqueeze(-1).expand(B, 3, L)
         kurt_exp = kurtosis.unsqueeze(-1).expand(B, 3, L)
-        inp = torch.cat([x_scaled, spike_interp, mean_exp, std_exp, kurt_exp], dim=1)
+        inp = torch.cat([x_scaled, peak_map, mean_exp, std_exp, kurt_exp], dim=1)  # (B, 15, L)
 
-        sigma_emb = self.sigma_emb(sigma)
+        sigma_emb = self.sigma_emb(sigma)  # (B, 64)
 
-        e1 = self.enc1(inp,           sigma_emb)
+        # encoder — inject peak_map additively at each level (re-downsampled to match)
+        e1 = self.enc1(inp, sigma_emb)
+        e1 = e1 + self.peak_proj1(peak_map)
+
         e2 = self.enc2(self.down(e1), sigma_emb)
+        e2 = e2 + self.peak_proj2(F.interpolate(peak_map, size=e2.shape[-1], mode='linear', align_corners=False))
+
         e3 = self.enc3(self.down(e2), sigma_emb)
+        e3 = e3 + self.peak_proj3(F.interpolate(peak_map, size=e3.shape[-1], mode='linear', align_corners=False))
 
         b = self.bottleneck(self.down(e3), sigma_emb)
+        b = b + self.peak_projb(F.interpolate(peak_map, size=b.shape[-1], mode='linear', align_corners=False))
 
+        # decoder with skip connections
         d3 = self.dec3(torch.cat([F.interpolate(b,  size=e3.shape[-1], mode='nearest'), e3], dim=1), sigma_emb)
         d2 = self.dec2(torch.cat([F.interpolate(d3, size=e2.shape[-1], mode='nearest'), e2], dim=1), sigma_emb)
         d1 = self.dec1(torch.cat([F.interpolate(d2, size=e1.shape[-1], mode='nearest'), e1], dim=1), sigma_emb)
@@ -157,23 +182,31 @@ class UNet1D(nn.Module):
         return self.out_conv(d1)
 
 
-# ── EDM wrapper ───────────────────────────────────────────────────────────────
+# ── EDM wrapper: applies preconditioning around Gϕ ───────────────────────────
 
 class EDMModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = UNet1D()
 
-    def forward(self, x_noisy, sigma, spike_hist, mean, std, kurtosis):
+    def forward(self, x_noisy, sigma, peak_map, mean, std, kurtosis):
+        # x_noisy: (B, 3, L) — z = x0 + ε
+        # returns x̂: (B, 3, L) — denoised estimate of x0
+
         skip  = c_skip(sigma).view(-1, 1, 1) * x_noisy
         scale = c_out(sigma).view(-1, 1, 1)
-        net_out = self.net(x_noisy, sigma, spike_hist, mean, std, kurtosis)
-        return skip + scale * net_out
+
+        net_out = self.net(x_noisy, sigma, peak_map, mean, std, kurtosis)
+
+        return skip + scale * net_out  # x̂ = cskip·z + cout·Gϕ(cin·z, cnoise, c)
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── Training loop ────────────────────────────────────────────────────────────
+
+P_UNCOND = 0.15   # fraction of samples trained unconditionally (CFG dropout)
 
 def sample_sigma(batch_size, device, P_mean=-1.2, P_std=1.2):
+    # sample σ from log-normal distribution as in EDM paper
     log_sigma = torch.randn(batch_size, device=device) * P_std + P_mean
     return torch.exp(log_sigma)
 
@@ -189,6 +222,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
     print(f"Parameters: {n_params:,}")
     print(f"Batch size: {batch_size}  ({len(dataloader)} batches/epoch)\n")
 
+    # save training config to a timestamped log file
     run_time   = datetime.now()
     timestamp  = run_time.strftime('%Y%m%d_%H%M%S')
     log_path   = f"{DRIVE_ROOT}/training_log_{timestamp}.txt"
@@ -204,10 +238,11 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  P_mean      = -1.2\n")
         f.write(f"  P_std       =  1.2\n\n")
         f.write("[Model architecture]\n")
-        f.write(f"  in_channels   = 15  (3 signal + 3 spike_hist + 3 mean + 3 std + 3 kurtosis)\n")
+        f.write(f"  in_channels   = 15  (3 signal + 3 peak_map + 3 mean + 3 std + 3 kurtosis)\n")
         f.write(f"  out_channels  = 3\n")
         f.write(f"  base_channels = 64\n")
         f.write(f"  embed_dim     = 64\n")
+        f.write(f"  peak_map      = multi-scale injection (enc1/enc2/enc3/bottleneck)\n")
         f.write(f"  total params  = {n_params:,}\n\n")
         f.write("[Training]\n")
         f.write(f"  epochs        = {epochs}\n")
@@ -216,39 +251,53 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
         f.write(f"  optimizer     = Adam\n")
         f.write(f"  grad_clip     = 1.0  (clip_grad_norm)\n")
         f.write(f"  loss_weight   = clamped at max 10\n")
+        f.write(f"  cfg_dropout   = {P_UNCOND}  (per-sample condition dropout)\n")
         f.write(f"  device        = {device}\n\n")
         f.write("[Dataset]\n")
         f.write(f"  path          = {DATASET_PATH}\n")
         f.write(f"  n_windows     = {len(dataset)}\n")
         f.write(f"  window_size   = {dataset.signals.shape[-1]}\n")
-        f.write(f"  conditions    = spike_hist ({N_BINS} bins), mean, std, kurtosis\n\n")
+        f.write(f"  conditions    = peak_map (K=3 peaks, sigma=10), mean, std, kurtosis\n\n")
         f.write(f"[Files]\n")
         f.write(f"  model         = {model_path}\n")
-        f.write(f"  log           = {log_path}\n\n")
+        f.write(f"  log           = {log_path}\n")
+    print(f"Training config saved to {log_path}\n")
+
+    with open(log_path, "a") as f:
         f.write("[Loss curve]\n")
-    print(f"Log: {log_path}\n")
 
     losses = []
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
-        for signals, spike_hists, means, stds, kurtoses in dataloader:
-            signals     = signals.to(device)
-            spike_hists = spike_hists.to(device)
-            means       = means.to(device)
-            stds        = stds.to(device)
-            kurtoses    = kurtoses.to(device)
+        for signals, peak_maps, means, stds, kurtoses in dataloader:
+            signals   = signals.to(device)
+            peak_maps = peak_maps.to(device)
+            means     = means.to(device)
+            stds      = stds.to(device)
+            kurtoses  = kurtoses.to(device)
             B = len(signals)
 
-            sigma   = sample_sigma(B, device)
+            # sample σ and noise
+            sigma   = sample_sigma(B, device)                                   # (B,)
             epsilon = torch.randn_like(signals) * sigma.view(B, 1, 1)
-            z       = signals + epsilon
+            z       = signals + epsilon                                         # z = x + ε
 
+            # compute target: (x0 - cskip·z) / cout
             cs     = c_skip(sigma).view(B, 1, 1)
             co     = c_out(sigma).view(B, 1, 1)
-            target = (signals - cs * z) / co
+            target = (signals - cs * z) / co                                   # (B, 3, L)
 
-            x_hat = model(z, sigma, spike_hists, means, stds, kurtoses)
+            # CFG condition dropout: per sample, zero all conditions with prob P_UNCOND
+            keep = (torch.rand(B, device=device) > P_UNCOND).float()
+            peak_maps_in = peak_maps * keep.view(B, 1, 1)
+            means_in     = means     * keep.view(B, 1)
+            stds_in      = stds      * keep.view(B, 1)
+            kurtoses_in  = kurtoses  * keep.view(B, 1)
 
+            # forward pass
+            x_hat = model(z, sigma, peak_maps_in, means_in, stds_in, kurtoses_in)  # (B, 3, L)
+
+            # weighted loss — clamp weight to prevent extreme values at small σ
             w    = loss_weight(sigma).clamp(max=10.0).view(B, 1, 1)
             loss = (w * (x_hat - target) ** 2).mean()
 
@@ -275,7 +324,7 @@ def train(epochs=15000, batch_size=32, lr=1e-4):
 
     end_time = datetime.now()
     with open(log_path, "a") as f:
-        f.write("\n[Results]\n")
+        f.write("[Results]\n")
         f.write(f"  final loss    = {losses[-1]:.6f}\n")
         f.write(f"  min loss      = {min(losses):.6f}  (epoch {losses.index(min(losses)) + 1})\n")
         f.write(f"  training time = {str(end_time - run_time).split('.')[0]}\n")
