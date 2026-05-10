@@ -230,6 +230,70 @@ plt.tight_layout()
 plt.show()
 
 
+# %% Visualize — denormalized velocities (actual m/s) for all 13 trajectories
+gen_means = data_gen["means"]   # (52, 3)
+gen_stds  = data_gen["stds"]    # (52, 3)
+
+fig, axes = plt.subplots(13, 3, figsize=(18, 30), sharex=True)
+traj_colors = plt.cm.tab20(np.linspace(0, 1, 13))
+for row, traj in enumerate(TRAJECTORIES):
+    idx  = np.where(gen_ids == traj["id"])[0][0]
+    sig  = gen_sigs[idx]                                          # (3, 206) normalized
+    vel  = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]  # (3, 206) m/s
+    for col in range(3):
+        axes[row, col].plot(vel[col], linewidth=0.8, color=traj_colors[row])
+        axes[row, col].grid(True, alpha=0.3)
+        if row == 0:
+            axes[row, col].set_title(vel_labels[col], fontsize=10)
+        if col == 0:
+            axes[row, col].set_ylabel(f"T{traj['id']}\n{traj['desc'][:18]}",
+                                      fontsize=7, rotation=0, labelpad=70)
+fig.suptitle("Synthetic dataset — denormalized velocities (m/s)", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+
+# %% Visualize — 3D trajectories (integrated positions) — all 13 overlaid
+fig = plt.figure(figsize=(12, 9))
+ax3d = fig.add_subplot(111, projection="3d")
+dt = 1.0
+for row, traj in enumerate(TRAJECTORIES):
+    idx = np.where(gen_ids == traj["id"])[0][0]
+    sig = gen_sigs[idx]
+    vel = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]
+    x = np.cumsum(vel[0] * dt)
+    y = np.cumsum(vel[1] * dt)
+    z = np.cumsum(vel[2] * dt)
+    ax3d.plot(x, y, z, color=traj_colors[row], linewidth=1.2, label=f"T{traj['id']}")
+    ax3d.scatter(x[0], y[0], z[0], color=traj_colors[row], s=30, zorder=5)
+ax3d.set_xlabel("X (∫vx dt)"); ax3d.set_ylabel("Y (∫vy dt)"); ax3d.set_zlabel("Z (∫vz dt)")
+ax3d.set_title("Synthetic dataset — all 13 trajectories (integrated positions)")
+ax3d.legend(fontsize=7, ncol=2, loc="upper left")
+plt.tight_layout()
+plt.show()
+
+
+# %% Visualize — 3D trajectories — individual subplots per trajectory
+fig = plt.figure(figsize=(20, 16))
+for row, traj in enumerate(TRAJECTORIES):
+    idx = np.where(gen_ids == traj["id"])[0][0]
+    sig = gen_sigs[idx]
+    vel = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]
+    x = np.cumsum(vel[0] * dt)
+    y = np.cumsum(vel[1] * dt)
+    z = np.cumsum(vel[2] * dt)
+    ax = fig.add_subplot(4, 4, row + 1, projection="3d")
+    ax.plot(x, y, z, color=traj_colors[row], linewidth=1.0)
+    ax.scatter(x[0], y[0], z[0], color=traj_colors[row], s=20)
+    ax.set_title(f"T{traj['id']}: {traj['desc'][:22]}\n[{traj['peak_label']}]",
+                 fontsize=6.5)
+    ax.tick_params(labelsize=5)
+    ax.set_xlabel("X", fontsize=6); ax.set_ylabel("Y", fontsize=6); ax.set_zlabel("Z", fontsize=6)
+fig.suptitle("Synthetic dataset — 3D trajectories (one window per trajectory)", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+
 # %% Diversity check — 4 windows per trajectory for traj 5 and 11
 fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
 colors = ["steelblue", "darkorange", "green", "purple"]
