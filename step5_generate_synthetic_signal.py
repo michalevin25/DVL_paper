@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import glob
 import os
 from scipy.stats import kurtosis as compute_kurtosis
-from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX
+from step3_train import EDMModel, SIGMA_MIN, SIGMA_MAX
 
 %matplotlib inline
 

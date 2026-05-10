@@ -12,7 +12,7 @@ import glob
 import os
 from scipy import stats as scipy_stats
 from scipy.signal import welch
-from step3_generatesignals import EDMModel, SIGMA_MIN, SIGMA_MAX
+from step3_train import EDMModel, SIGMA_MIN, SIGMA_MAX
 
 PEAK_SIGMA  = 10   # must match step1
 K_PEAKS     = 3
