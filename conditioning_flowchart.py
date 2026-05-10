@@ -96,3 +96,5 @@ plt.savefig("/Users/michal/Desktop/PhD/dvl paper/conditioning_flowchart.png",
             dpi=150, bbox_inches="tight")
 plt.show()
 print("Saved → conditioning_flowchart.png")
+
+# %%
