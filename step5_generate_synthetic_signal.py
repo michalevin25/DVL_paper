@@ -17,7 +17,7 @@ from step3_train import EDMModel, SIGMA_MIN, SIGMA_MAX
 
 PEAK_SIGMA         = 10    # must match step1
 SIGNAL_LENGTH      = 206   # window size, same as training
-N_WINDOWS_PER_TRAJ = 4     # matches real dataset (stride=50, traj_len≈400)
+N_WINDOWS_PER_TRAJ = 10    # matches real dataset (stride=20, traj_len≈400)
 
 DATA_DIR = "/Users/michal/Desktop/PhD/dvl paper/DATA"
 OUT_DIR  = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA"
