@@ -1,3 +1,10 @@
+# %% [markdown]
+# # Step 4: Generate & Evaluate
+
+# %%
+%matplotlib inline
+
+# %% Imports & config
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,8 +21,7 @@ DATA_DIR     = "/Users/michal/Desktop/PhD/dvl paper/DATA"
 DATASET_PATH = f"{DATA_DIR}/dvl_dataset.npz"
 
 
-# ── Load latest model by timestamp ───────────────────────────────────────────
-
+# %% Load model
 candidates = sorted(glob.glob(f"{DATA_DIR}/edm_model_*.pt"))
 if not candidates:
     raise FileNotFoundError(f"No edm_model_*.pt found in {DATA_DIR}")
@@ -30,6 +36,7 @@ print("Model loaded.")
 
 # ── EDM sampler (deterministic Euler-Heun) ────────────────────────────────────
 
+# %% Helper functions
 def generate(peak_map, mean, std, kurtosis, signal_length=206, n_steps=200, seed=None,
              cfg_scale=1.0, return_trajectory=False):
     """
@@ -151,7 +158,7 @@ def plot_denoising_steps(peak_map, mean, std, kurtosis, signal_length=206, n_ste
     plt.show()
 
 
-# ── Load dataset ──────────────────────────────────────────────────────────────
+# %% Load dataset
 
 data      = np.load(DATASET_PATH)
 peak_maps = torch.tensor(data["peak_maps"], dtype=torch.float32)  # (W, 3, N)
@@ -171,7 +178,7 @@ std_0       = stds[cond_idx].unsqueeze(0)
 kurt_0      = kurtoses[cond_idx].unsqueeze(0)
 
 
-# ── Shared conditions for tests (used in commented-out tests below) ───────────
+# %% Shared conditions
 
 mean_syn = means[0].unsqueeze(0)
 std_syn  = stds[0].unsqueeze(0)
@@ -185,7 +192,7 @@ peak_late  = make_peak_map([175],     [2.0])
 peak_two   = make_peak_map([40, 155], [2.0, 2.0])
 peak_heavy = make_peak_map([40, 103, 155], [2.0, 1.5, 2.0])
 
-# ── Test 1: designed peak maps ────────────────────────────────────────────────
+# %% Test 1: designed peak maps
 scenarios = [
     (peak_none,  "no maneuvers"),
     (peak_early, "early maneuver (~t=30)"),
@@ -208,7 +215,7 @@ plt.tight_layout()
 plt.show()
 
 
-# ── Test 2: same peak map, different seeds ────────────────────────────────────
+# %% Test 2: same peak map, different seeds
 seeds  = [0, 42, 123, 999, 2024]
 colors = ["steelblue", "darkorange", "green", "purple", "brown"]
 fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
@@ -224,7 +231,7 @@ plt.tight_layout()
 plt.show()
 
 
-# ── Test 3: real peak map vs empty peak map ───────────────────────────────────
+# %% Test 3: real peak map vs empty peak map
 compare_indices = [0, 15, 30]
 fig, axes = plt.subplots(3, len(compare_indices) * 2, figsize=(22, 8), sharex=True)
 for col, idx in enumerate(compare_indices):
@@ -249,7 +256,7 @@ plt.tight_layout()
 plt.show()
 
 
-# ── Test 4: unseen trajectories 12 and 13 ────────────────────────────────────
+# %% Test 4: unseen trajectories 12 and 13
 for test_traj in [12, 13]:
     test_mask    = np.where(traj_ids == test_traj)[0]
     test_win_idx = test_mask[len(test_mask) // 2]
@@ -277,21 +284,18 @@ for test_traj in [12, 13]:
     )
 
 
-# ── Denoising visualisation ───────────────────────────────────────────────────
+# %% Denoising visualisation
 plot_denoising_steps(peak_map_0, mean_0, std_0, kurt_0, signal_length=N)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EVALUATION
-# ══════════════════════════════════════════════════════════════════════════════
-
+# %% Evaluation helpers
 def window_stats(sig_tensor):
     """(3, N) tensor → (mean, std, kurtosis) each shape (3,)."""
     s = sig_tensor.numpy()
     return s.mean(axis=1), s.std(axis=1), scipy_stats.kurtosis(s, axis=1, fisher=True)
 
 
-# ── Evaluation 1: Statistical fidelity ───────────────────────────────────────
+# %% Evaluation 1: Statistical fidelity
 real_m, real_s, real_k = [], [], []
 gen_m,  gen_s,  gen_k  = [], [], []
 is_test_flag            = []
@@ -327,7 +331,7 @@ fig.suptitle("Evaluation 1: statistical fidelity")
 plt.tight_layout(); plt.show()
 
 
-# ── Evaluation 2: Power spectral density ─────────────────────────────────────
+# %% Evaluation 2: Power spectral density
 test_indices = np.where(traj_ids >= 12)[0]
 nperseg      = min(64, N)
 real_psds, gen_psds = [], []
@@ -354,7 +358,7 @@ ax.set_title("Evaluation 2: power spectral density"); ax.legend(); ax.grid(True,
 plt.tight_layout(); plt.show()
 
 
-# ── Evaluation 3: Diversity ───────────────────────────────────────────────────
+# %% Evaluation 3: Diversity
 test_indices = np.where(traj_ids >= 12)[0]
 div_seeds  = [0, 42, 123, 999, 2024]
 div_colors = ["steelblue", "darkorange", "green", "purple", "brown"]
@@ -380,7 +384,7 @@ for idx in test_indices[:2]:
     plt.tight_layout(); plt.show()
 
 
-# ── Evaluation 4: Controllability ────────────────────────────────────────────
+# %% Evaluation 4: Controllability
 ctrl_scenarios = [
     (peak_none,  "no maneuvers"), (peak_early, "early (~t=30)"),
     (peak_mid,   "mid (~t=103)"), (peak_late,  "late (~t=175)"),
@@ -406,9 +410,7 @@ fig.suptitle("Evaluation 4: controllability — input peak map vs generated sign
 plt.tight_layout(); plt.show()
 
 
-# ── Evaluation 5: condition ablation ─────────────────────────────────────────
-# Generate the same window 6 times, zeroing out one condition at a time.
-# Shows how much each condition contributes to the output.
+# %% Evaluation 5: condition ablation
 
 print("Evaluation 5: condition ablation...")
 
