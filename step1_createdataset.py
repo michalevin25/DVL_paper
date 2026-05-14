@@ -12,7 +12,7 @@ SAVE_PATH      = "/Users/michal/Desktop/PhD/dvl paper/DATA/dvl_dataset"
 N_TRAJECTORIES = 13
 SMOOTHING      = 0.5
 WINDOW_SIZE    = 206
-STRIDE         = 50
+STRIDE         = 20
 K_PEAKS        = 3    # top-K curvature peaks per axis
 PEAK_SIGMA     = 10   # Gaussian bump width (samples)
 

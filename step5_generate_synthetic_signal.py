@@ -1,8 +1,9 @@
 # %% [markdown]
 # # Generate Synthetic DVL Dataset
-# 13 trajectories × 4 windows × 206 samples, with mixed conditions.
+# 13 trajectories × N_SEEDS signals × 206 samples, with mixed conditions.
 # Stats (mean, std, kurtosis) are taken from different real trajectories and
 # combined to create diverse but physically plausible synthetic trajectories.
+# Generates at signal_length=206 to match training length.
 
 # %% Imports & setup
 import torch
@@ -15,9 +16,10 @@ from step3_train import EDMModel, SIGMA_MIN, SIGMA_MAX
 
 %matplotlib inline
 
-PEAK_SIGMA         = 10    # must match step1
-SIGNAL_LENGTH      = 206   # window size, same as training
-N_WINDOWS_PER_TRAJ = 4     # matches real dataset (stride=50, traj_len≈400)
+PEAK_SIGMA    = 10     # must match step1
+SIGNAL_LENGTH = 206    # matches training length
+N_SEEDS       = 5      # signals generated per trajectory (different seeds)
+TRAIN_LENGTH  = 206    # length model was trained on — used to scale peak_times
 
 DATA_DIR = "/Users/michal/Desktop/PhD/dvl paper/DATA"
 OUT_DIR  = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA"
@@ -149,18 +151,21 @@ all_stds      = []
 all_kurtoses  = []
 all_traj_ids  = []
 
-print(f"Generating {len(TRAJECTORIES)} trajectories × {N_WINDOWS_PER_TRAJ} windows...")
+print(f"Generating {len(TRAJECTORIES)} trajectories × {N_SEEDS} seeds × {SIGNAL_LENGTH} samples...")
 print()
 
 for traj in TRAJECTORIES:
-    pm      = make_peak_map(traj["peak_times"], traj["amps"])
+    # Scale peak_times from training length (206) to generation length (400)
+    scaled_times = [int(t * SIGNAL_LENGTH / TRAIN_LENGTH) for t in traj["peak_times"]]
+    pm      = make_peak_map(scaled_times, traj["amps"], signal_length=SIGNAL_LENGTH)
     mean_t  = torch.tensor([traj["mean"]],  dtype=torch.float32)  # (1, 3)
     std_t   = torch.tensor([traj["std"]],   dtype=torch.float32)
     kurt_t  = torch.tensor([traj["kurt"]],  dtype=torch.float32)
-    pm_np   = pm.squeeze(0).numpy()  # (3, L) — stored as-is
+    pm_np   = pm.squeeze(0).numpy()  # (3, 400)
 
-    for win_idx in range(N_WINDOWS_PER_TRAJ):
-        sig = generate(pm, mean_t, std_t, kurt_t, seed=win_idx)  # (3, L) denormalized
+    for seed in range(N_SEEDS):
+        sig = generate(pm, mean_t, std_t, kurt_t,
+                       signal_length=SIGNAL_LENGTH, seed=seed)  # (3, 400) denormalized
 
         # Recompute actual stats from generated signal (matches step1 approach)
         sig_np      = sig.numpy()
@@ -169,7 +174,7 @@ for traj in TRAJECTORIES:
         sig_norm    = (sig_np - actual_mean[:, None]) / actual_std[:, None]
         actual_kurt = compute_kurtosis(sig_norm, axis=1, fisher=True)  # (3,)
 
-        all_signals.append(sig_norm)
+        all_signals.append(sig_np)
         all_peak_maps.append(pm_np)
         all_means.append(actual_mean)
         all_stds.append(actual_std)
@@ -181,20 +186,20 @@ for traj in TRAJECTORIES:
 out_path = f"{OUT_DIR}/synthetic_dataset"
 np.savez(
     out_path,
-    signals   = np.stack(all_signals),    # (52, 3, 206)
-    peak_maps = np.stack(all_peak_maps),  # (52, 3, 206)
-    means     = np.stack(all_means),      # (52, 3)
-    stds      = np.stack(all_stds),       # (52, 3)
-    kurtoses  = np.stack(all_kurtoses),   # (52, 3)
-    traj_ids  = np.array(all_traj_ids),   # (52,)
+    signals   = np.stack(all_signals),    # (65, 3, 400) — denormalized m/s
+    peak_maps = np.stack(all_peak_maps),  # (65, 3, 400)
+    means     = np.stack(all_means),      # (65, 3)
+    stds      = np.stack(all_stds),       # (65, 3)
+    kurtoses  = np.stack(all_kurtoses),   # (65, 3)
+    traj_ids  = np.array(all_traj_ids),   # (65,)
 )
 print(f"\nSaved → {out_path}.npz")
-print(f"Shape: {np.stack(all_signals).shape}  ({len(TRAJECTORIES)} trajs × {N_WINDOWS_PER_TRAJ} windows × 3 axes × {SIGNAL_LENGTH} samples)")
+print(f"Shape: {np.stack(all_signals).shape}  ({len(TRAJECTORIES)} trajs × {N_SEEDS} seeds × 3 axes × {SIGNAL_LENGTH} samples)")
 
 
 # %% Visualize — one window per trajectory (vx, vy, vz)
 data_gen = np.load(f"{OUT_DIR}/synthetic_dataset.npz")
-gen_sigs = data_gen["signals"]    # (52, 3, 206)
+gen_sigs = data_gen["signals"]    # (65, 3, 400)
 gen_ids  = data_gen["traj_ids"]
 vel_labels = ["vx", "vy", "vz"]
 
@@ -209,14 +214,14 @@ for row, traj in enumerate(TRAJECTORIES):
             axes[row, col].set_title(vel_labels[col], fontsize=10)
         if col == 0:
             axes[row, col].set_ylabel(f"T{traj['id']}", fontsize=8, rotation=0, labelpad=25)
-fig.suptitle("Synthetic dataset — one window per trajectory (normalized signals)", fontsize=12)
+fig.suptitle("Synthetic dataset — one window per trajectory (m/s)", fontsize=12)
 plt.tight_layout()
 plt.show()
 
 
 # %% Visualize — peak maps for all 13 trajectories
 fig, axes = plt.subplots(13, 1, figsize=(14, 20), sharex=True)
-gen_pms = data_gen["peak_maps"]  # (52, 3, 206)
+gen_pms = data_gen["peak_maps"]  # (65, 3, 400)
 for row, traj in enumerate(TRAJECTORIES):
     idx = np.where(gen_ids == traj["id"])[0][0]
     pm  = gen_pms[idx].mean(axis=0)  # average across axes for display
@@ -230,21 +235,79 @@ plt.tight_layout()
 plt.show()
 
 
-# %% Diversity check — 4 windows per trajectory for traj 5 and 11
+# %% Visualize — velocities (m/s) for all 13 trajectories
+fig, axes = plt.subplots(13, 3, figsize=(18, 30), sharex=True)
+traj_colors = plt.cm.tab20(np.linspace(0, 1, 13))
+for row, traj in enumerate(TRAJECTORIES):
+    idx  = np.where(gen_ids == traj["id"])[0][0]
+    vel  = gen_sigs[idx]                                           # (3, 400) m/s
+    for col in range(3):
+        axes[row, col].plot(vel[col], linewidth=0.8, color=traj_colors[row])
+        axes[row, col].grid(True, alpha=0.3)
+        if row == 0:
+            axes[row, col].set_title(vel_labels[col], fontsize=10)
+        if col == 0:
+            axes[row, col].set_ylabel(f"T{traj['id']}\n{traj['desc'][:18]}",
+                                      fontsize=7, rotation=0, labelpad=70)
+fig.suptitle("Synthetic dataset — velocities (m/s)", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+
+# %% Visualize — 3D trajectories (integrated positions) — all 13 overlaid
+fig = plt.figure(figsize=(12, 9))
+ax3d = fig.add_subplot(111, projection="3d")
+dt = 1.0
+for row, traj in enumerate(TRAJECTORIES):
+    idx = np.where(gen_ids == traj["id"])[0][0]
+    vel = gen_sigs[idx]                          # (3, 400) m/s
+    x = np.cumsum(vel[0] * dt)
+    y = np.cumsum(vel[1] * dt)
+    z = np.cumsum(vel[2] * dt)
+    ax3d.plot(x, y, z, color=traj_colors[row], linewidth=1.2, label=f"T{traj['id']}")
+    ax3d.scatter(x[0], y[0], z[0], color=traj_colors[row], s=30, zorder=5)
+ax3d.set_xlabel("X (∫vx dt)"); ax3d.set_ylabel("Y (∫vy dt)"); ax3d.set_zlabel("Z (∫vz dt)")
+ax3d.set_title("Synthetic dataset — all 13 trajectories (integrated positions)")
+ax3d.legend(fontsize=7, ncol=2, loc="upper left")
+plt.tight_layout()
+plt.show()
+
+
+# %% Visualize — 3D trajectories — individual subplots per trajectory
+fig = plt.figure(figsize=(20, 16))
+for row, traj in enumerate(TRAJECTORIES):
+    idx = np.where(gen_ids == traj["id"])[0][0]
+    vel = gen_sigs[idx]                          # (3, 400) m/s
+    x = np.cumsum(vel[0] * dt)
+    y = np.cumsum(vel[1] * dt)
+    z = np.cumsum(vel[2] * dt)
+    ax = fig.add_subplot(4, 4, row + 1, projection="3d")
+    ax.plot(x, y, z, color=traj_colors[row], linewidth=1.0)
+    ax.scatter(x[0], y[0], z[0], color=traj_colors[row], s=20)
+    ax.set_title(f"T{traj['id']}: {traj['desc'][:22]}\n[{traj['peak_label']}]",
+                 fontsize=6.5)
+    ax.tick_params(labelsize=5)
+    ax.set_xlabel("X", fontsize=6); ax.set_ylabel("Y", fontsize=6); ax.set_zlabel("Z", fontsize=6)
+fig.suptitle("Synthetic dataset — 3D trajectories (one window per trajectory)", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+
+# %% Diversity check — 5 seeds per trajectory for traj 5 and 11
 fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
-colors = ["steelblue", "darkorange", "green", "purple"]
+colors = ["steelblue", "darkorange", "green", "purple", "brown"]
 for row, tid in enumerate([5, 11]):
     mask = np.where(gen_ids == tid)[0]
-    for win_i, idx in enumerate(mask):
+    for seed_i, idx in enumerate(mask):
         for col in range(3):
-            axes[row, col].plot(gen_sigs[idx, col], color=colors[win_i],
-                                linewidth=0.8, alpha=0.8, label=f"win {win_i}")
+            axes[row, col].plot(gen_sigs[idx, col], color=colors[seed_i],
+                                linewidth=0.8, alpha=0.8, label=f"seed {seed_i}")
     for col in range(3):
         axes[row, col].set_ylabel(vel_labels[col])
         axes[row, col].grid(True, alpha=0.3)
         if row == 0:
             axes[row, col].legend(fontsize=7)
     axes[row, 0].set_title(f"Traj {tid} — {TRAJECTORIES[tid-1]['desc']}", loc="left", fontsize=9)
-fig.suptitle("Diversity check: 4 windows (seeds 0–3) for two trajectories")
+fig.suptitle("Diversity check: 5 seeds for two trajectories (400 samples each)")
 plt.tight_layout()
 plt.show()
