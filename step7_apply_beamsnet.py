@@ -222,7 +222,7 @@ traj_ids  = [r["traj_id"] for r in results]
 bn_rmses  = [rmse(r["gt"], r["beamsnet"]) for r in results]
 ls_rmses  = [rmse(r["gt"], r["ls"])       for r in results]
 
-x     = np.arange(N_TRAJ)
+x     = np.arange(len(results))
 width = 0.35
 
 fig, ax = plt.subplots(figsize=(12, 5))
@@ -271,7 +271,125 @@ for j in range(3):
     axes[j].set_ylabel(labels[j])
     axes[j].grid(True, alpha=0.3)
 axes[0].legend(loc="upper right", fontsize=9)
-axes[0].set_title("Trajectory 1 — BeamsNetV2 vs LS vs GT (DVL frame, per axis)")
+axes[0].set_title("Trajectory 1 — BeamsNetV2 vs LS vs GT (body frame, per axis)")
+axes[2].set_xlabel("Sample")
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# %% [markdown]
+# ## Synthetic data evaluation
+# Loads synthetic_beams_dataset.npz (step6) and evaluates BeamsNetV2 + LS
+# on 65 synthetic signals (13 trajectories × 5 seeds).
+# Input: noisy beams. GT: body-frame velocity from synthetic_dataset.npz.
+# ============================================================
+
+# %% Load synthetic datasets
+
+SYN_BEAMS_PATH = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA/synthetic_beams_dataset.npz"
+SYN_GT_PATH    = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA/synthetic_dataset.npz"
+
+syn_data   = np.load(SYN_BEAMS_PATH)
+syn_gt     = np.load(SYN_GT_PATH)
+
+syn_beams_noisy = syn_data["beams_noisy"]  # (65, 4, N)
+syn_signals     = syn_gt["signals"]        # (65, 3, N) body-frame m/s
+syn_traj_ids    = syn_gt["traj_ids"]       # (65,)
+
+N_SYN = len(syn_beams_noisy)
+print(f"Synthetic: {N_SYN} signals, beams {syn_beams_noisy.shape}, gt {syn_signals.shape}")
+
+# %% Run BeamsNet and LS on synthetic signals
+
+syn_results = []
+
+with torch.no_grad():
+    for i in range(N_SYN):
+        X, Y_win, Z = make_windows(syn_beams_noisy[i], syn_signals[i])
+
+        X_t = torch.from_numpy(X).to(device)
+        Y_t = torch.from_numpy(Y_win).to(device)
+
+        pred_bn = model(X_t, Y_t).cpu().numpy()   # (M, 3)
+        pred_ls = (P_INV @ X.T).T                 # (M, 3)
+
+        syn_results.append({
+            "traj_id":  syn_traj_ids[i],
+            "gt":       Z,
+            "beamsnet": pred_bn,
+            "ls":       pred_ls,
+        })
+
+print(f"Inference done on {N_SYN} synthetic signals")
+
+# %% Synthetic summary table (aggregated per trajectory ID)
+
+syn_rows = []
+for r in syn_results:
+    gt, bn, ls = r["gt"], r["beamsnet"], r["ls"]
+    syn_rows.append({
+        "Traj":    r["traj_id"],
+        "BN RMSE": rmse(gt, bn),
+        "LS RMSE": rmse(gt, ls),
+        "BN MAE":  mae(gt, bn),
+        "LS MAE":  mae(gt, ls),
+        "BN R2":   nse(gt, bn),
+        "LS R2":   nse(gt, ls),
+        "BN VAF":  vaf(gt, bn),
+        "LS VAF":  vaf(gt, ls),
+    })
+
+syn_df = pd.DataFrame(syn_rows)
+print("\nPer-signal results (synthetic):")
+print(syn_df.round(4).to_string(index=False))
+
+syn_all_gt = np.concatenate([r["gt"]       for r in syn_results], axis=0)
+syn_all_bn = np.concatenate([r["beamsnet"] for r in syn_results], axis=0)
+syn_all_ls = np.concatenate([r["ls"]       for r in syn_results], axis=0)
+
+syn_bn_rmse = rmse(syn_all_gt, syn_all_bn)
+syn_ls_rmse = rmse(syn_all_gt, syn_all_ls)
+syn_improv  = (syn_ls_rmse - syn_bn_rmse) / syn_ls_rmse * 100
+
+print("\nSynthetic overall:")
+print(f"  BeamsNetV2 RMSE={syn_bn_rmse:.4f}  MAE={mae(syn_all_gt, syn_all_bn):.4f}  "
+      f"R2={nse(syn_all_gt, syn_all_bn):.4f}  VAF={vaf(syn_all_gt, syn_all_bn):.2f}%")
+print(f"  LS         RMSE={syn_ls_rmse:.4f}  MAE={mae(syn_all_gt, syn_all_ls):.4f}  "
+      f"R2={nse(syn_all_gt, syn_all_ls):.4f}  VAF={vaf(syn_all_gt, syn_all_ls):.2f}%")
+print(f"  Improvement (RMSE): {syn_improv:.2f}%")
+
+# %% Plot — synthetic RMSE per signal (BeamsNet vs LS)
+
+syn_bn_rmses = [rmse(r["gt"], r["beamsnet"]) for r in syn_results]
+syn_ls_rmses = [rmse(r["gt"], r["ls"])       for r in syn_results]
+syn_x        = np.arange(N_SYN)
+
+fig, ax = plt.subplots(figsize=(16, 5))
+ax.bar(syn_x - width / 2, syn_bn_rmses, width, label="BeamsNetV2", color="steelblue", alpha=0.85)
+ax.bar(syn_x + width / 2, syn_ls_rmses, width, label="LS",         color="tomato",    alpha=0.85)
+ax.axhline(syn_bn_rmse, color="steelblue", linestyle="--", linewidth=1.2, label=f"BN mean={syn_bn_rmse:.4f}")
+ax.axhline(syn_ls_rmse, color="tomato",    linestyle="--", linewidth=1.2, label=f"LS mean={syn_ls_rmse:.4f}")
+ax.set_xticks(syn_x)
+ax.set_xticklabels([f"T{int(tid)}" for tid in syn_traj_ids], fontsize=7, rotation=45)
+ax.set_ylabel("RMSE [m/s]")
+ax.set_title("BeamsNetV2 vs LS — RMSE per synthetic signal (body frame)")
+ax.legend()
+ax.grid(True, axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# %% Plot — per-axis predictions for first synthetic signal
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+r = syn_results[0]
+for j in range(3):
+    axes[j].plot(r["gt"][:, j],       label="GT",         linewidth=0.9, color="black")
+    axes[j].plot(r["beamsnet"][:, j], label="BeamsNetV2", linewidth=0.8, color="steelblue", alpha=0.8)
+    axes[j].plot(r["ls"][:, j],       label="LS",         linewidth=0.8, color="tomato", linestyle="--", alpha=0.8)
+    axes[j].set_ylabel(["vx", "vy", "vz"][j])
+    axes[j].grid(True, alpha=0.3)
+axes[0].legend(loc="upper right", fontsize=9)
+axes[0].set_title(f"Synthetic signal 1 (traj {int(syn_traj_ids[0])}) — BeamsNetV2 vs LS vs GT")
 axes[2].set_xlabel("Sample")
 plt.tight_layout()
 plt.show()
