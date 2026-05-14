@@ -1,12 +1,10 @@
 # %% [markdown]
 # # Apply BeamsNet to A-KIT Beam Data (Zero-Shot)
 # Loads AKIT_beams_dataset.npz (step6) and applies the pre-trained BeamsNetV2
-# to each of the 13 trajectories with no retraining.
-# Our beams were computed as H @ T_body_to_DVL @ v_body, so the LS baseline
-# and BeamsNet output are both in DVL frame. GT is transformed to DVL frame
-# for fair comparison.
-# Note: BeamsNetV1 (also available) additionally requires IMU windows — see
-# BeamsNetV1_Test.py for the input format; adapting it is a natural next step.
+# to each trajectory with no retraining.
+# Beams are computed as H @ v_body (no mounting rotation), matching BeamsNet's
+# training assumption. GT is body-frame velocity directly.
+# Trajectory 12 is excluded (degenerate velocity profile).
 
 # %% Imports & paths
 import torch
@@ -26,28 +24,8 @@ BEAMS_PATH  = "/Users/michal/Desktop/PhD/dvl paper/DATA/AKIT_beams_dataset.npz"
 MODEL_PATH  = "/Users/michal/Desktop/PhD/dvl paper/BeamsNet-main/code/BeamsNetV2.pkl"
 DATA_PATH   = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
 N_TRAJ      = 13
-T           = 3   # history window — must match BeamsNetV2 training
-
-# %% DVL geometry helpers (same as step6)
-
-def T_ref_to_body_rad(Euler_body_to_ref_rad):
-    phi, theta, psi = Euler_body_to_ref_rad
-    T1 = np.array([[1,  0,            0           ],
-                   [0,  np.cos(phi),  np.sin(phi) ],
-                   [0, -np.sin(phi),  np.cos(phi) ]])
-    T2 = np.array([[ np.cos(theta), 0, -np.sin(theta)],
-                   [ 0,             1,  0            ],
-                   [ np.sin(theta), 0,  np.cos(theta)]])
-    T3 = np.array([[ np.cos(psi), np.sin(psi), 0],
-                   [-np.sin(psi), np.cos(psi), 0],
-                   [ 0,          0,            1]])
-    return T1 @ T2 @ T3
-
-def T_body_to_ref_rad(euler):
-    return T_ref_to_body_rad(euler).T
-
-GT_body_to_DVL_deg = np.array([-179.9845, 0.2162, -44.3146])
-T_BODY_TO_DVL = T_body_to_ref_rad(GT_body_to_DVL_deg * np.pi / 180)  # (3, 3)
+T           = 3        # history window — must match BeamsNetV2 training
+SKIP_TRAJS  = {12}     # excluded from evaluation
 
 # %% B-matrix and LS pseudoinverse (BeamsNet geometry — no mounting correction)
 # This is the same simple A matrix BeamsNet uses internally.
@@ -111,21 +89,19 @@ gt_body_list = []
 for i in range(N_TRAJ):
     csv = pd.read_csv(f"{DATA_PATH}/Trajectory{i+1}/DVL_trajectory{i+1}.csv")
     vx, vy, vz = csv.iloc[:, 1].values, csv.iloc[:, 2].values, csv.iloc[:, 3].values
-    gt_body_list.append(np.stack([vx, vy, vz], axis=0))  # (3, N)
-
-# GT is body-frame velocity; transform to DVL frame to match LS/BeamsNet output frame
-gt_dvl_list = [T_BODY_TO_DVL @ gt for gt in gt_body_list]  # each (3, N)
+    gt_body_list.append(np.stack([vx, vy, vz], axis=0))  # (3, N) body frame
 
 print("Loaded data:")
 for i in range(N_TRAJ):
-    print(f"  Traj {i+1}: beams {beams_list[i].shape}  noisy {noisy_beams_list[i].shape}  gt {gt_dvl_list[i].shape}")
+    tag = " [SKIP]" if (i + 1) in SKIP_TRAJS else ""
+    print(f"  Traj {i+1}: beams {beams_list[i].shape}  noisy {noisy_beams_list[i].shape}  gt {gt_body_list[i].shape}{tag}")
 
 # %% Build per-trajectory inference inputs
 
-def make_windows(noisy_beams, gt_dvl):
+def make_windows(noisy_beams, gt_body):
     """
     noisy_beams : (4, N)  — error-model beams, used as model input
-    gt_dvl      : (3, N)  — clean DVL-frame GT, used for evaluation only
+    gt_body     : (3, N)  — body-frame GT, used for evaluation only
     Returns X (N-T, 4), Y (N-T, T, 4), Z (N-T, 3)
     """
     N = noisy_beams.shape[1]
@@ -135,7 +111,7 @@ def make_windows(noisy_beams, gt_dvl):
     for t in range(N - T):
         X[t] = noisy_beams[:, t + T]          # current noisy beam
         Y[t] = noisy_beams[:, t:t + T].T      # (T, 4) noisy history
-        Z[t] = gt_dvl[:, t + T]               # clean GT at t+T
+        Z[t] = gt_body[:, t + T]              # body-frame GT at t+T
     return X, Y, Z
 
 # %% Metrics helpers (same as BeamsNet original)
@@ -162,7 +138,9 @@ results = []
 
 with torch.no_grad():
     for i in range(N_TRAJ):
-        X, Y_win, Z = make_windows(noisy_beams_list[i], gt_dvl_list[i])
+        if (i + 1) in SKIP_TRAJS:
+            continue
+        X, Y_win, Z = make_windows(noisy_beams_list[i], gt_body_list[i])
 
         X_t = torch.from_numpy(X).to(device)         # (M, 4)
         Y_t = torch.from_numpy(Y_win).to(device)     # (M, T, 4)

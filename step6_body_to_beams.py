@@ -65,20 +65,17 @@ def apply_error_model(beams):
 
 def body_to_beams(v_body):
     """
-    Convert DVL velocity in body frame to 4 beam velocities.
+    Project body-frame velocity directly to 4 beam velocities (no mounting rotation).
+    Matches BeamsNet's training assumption: beams = H @ v_body.
     v_body : (3,) or (N, 3)  →  beams : (4,) or (N, 4)
     """
-    GT_body_to_DVL_deg = np.array([-179.9845, 0.2162, -44.3146])
-    T_body_to_DVL      = T_body_to_ref_rad(GT_body_to_DVL_deg * np.pi / 180)
-    H                  = B_mat()
-
+    H      = B_mat()
     v_body = np.asarray(v_body)
     single = v_body.ndim == 1
     if single:
         v_body = v_body[np.newaxis, :]
 
-    v_dvl = v_body @ T_body_to_DVL.T   # (N, 3)
-    beams = v_dvl @ H.T                # (N, 4)
+    beams = v_body @ H.T   # (N, 4)
 
     return beams[0] if single else beams
 
@@ -151,13 +148,10 @@ plt.show()
 
 # %% Round-trip sanity check (single sample)
 
-v_test    = signals[0][:, 0]           # (3,)
-beams_rt  = body_to_beams(v_test)      # (4,)
-H         = B_mat()
-GT_body_to_DVL_deg = np.array([-179.9845, 0.2162, -44.3146])
-T_body_to_DVL      = T_body_to_ref_rad(GT_body_to_DVL_deg * np.pi / 180)
-v_dvl_rt  = T_body_to_DVL @ v_test
-v_rec     = T_body_to_DVL.T @ (np.linalg.pinv(H) @ beams_rt)
+v_test   = signals[0][:, 0]            # (3,)
+beams_rt = body_to_beams(v_test)       # (4,)
+H        = B_mat()
+v_rec    = np.linalg.pinv(H) @ beams_rt
 
 print("Round-trip check (first sample of traj 1):")
 print(f"  original  : {v_test}")
