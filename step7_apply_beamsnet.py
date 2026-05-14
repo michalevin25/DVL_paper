@@ -103,8 +103,9 @@ print(f"BeamsNetV2 loaded on {device}")
 
 # %% Load beam dataset and GT body velocities
 
-data_beams = np.load(BEAMS_PATH)
-beams_list = [data_beams[f"traj{i+1}_beams"] for i in range(N_TRAJ)]  # each (4, N)
+data_beams      = np.load(BEAMS_PATH)
+beams_list      = [data_beams[f"traj{i+1}_beams"]       for i in range(N_TRAJ)]  # (4, N) clean
+noisy_beams_list = [data_beams[f"traj{i+1}_beams_noisy"] for i in range(N_TRAJ)]  # (4, N) with error model
 
 gt_body_list = []
 for i in range(N_TRAJ):
@@ -112,29 +113,29 @@ for i in range(N_TRAJ):
     vx, vy, vz = csv.iloc[:, 1].values, csv.iloc[:, 2].values, csv.iloc[:, 3].values
     gt_body_list.append(np.stack([vx, vy, vz], axis=0))  # (3, N)
 
-# Transform GT to DVL frame for comparison with LS/BeamsNet output
-gt_dvl_list = [T_BODY_TO_DVL @ gt for gt in gt_body_list]   # each (3, N)
+# GT is body-frame velocity; transform to DVL frame to match LS/BeamsNet output frame
+gt_dvl_list = [T_BODY_TO_DVL @ gt for gt in gt_body_list]  # each (3, N)
 
 print("Loaded data:")
 for i in range(N_TRAJ):
-    print(f"  Traj {i+1}: beams {beams_list[i].shape}  gt_dvl {gt_dvl_list[i].shape}")
+    print(f"  Traj {i+1}: beams {beams_list[i].shape}  noisy {noisy_beams_list[i].shape}  gt {gt_dvl_list[i].shape}")
 
 # %% Build per-trajectory inference inputs
 
-def make_windows(beams, gt_dvl):
+def make_windows(noisy_beams, gt_dvl):
     """
-    beams  : (4, N)
-    gt_dvl : (3, N)
+    noisy_beams : (4, N)  — error-model beams, used as model input
+    gt_dvl      : (3, N)  — clean DVL-frame GT, used for evaluation only
     Returns X (N-T, 4), Y (N-T, T, 4), Z (N-T, 3)
     """
-    N = beams.shape[1]
+    N = noisy_beams.shape[1]
     X = np.zeros((N - T, 4),    dtype=np.float32)
     Y = np.zeros((N - T, T, 4), dtype=np.float32)
     Z = np.zeros((N - T, 3),    dtype=np.float32)
     for t in range(N - T):
-        X[t] = beams[:, t + T]          # current beam
-        Y[t] = beams[:, t:t + T].T      # (T, 4) history
-        Z[t] = gt_dvl[:, t + T]         # GT at t+T
+        X[t] = noisy_beams[:, t + T]          # current noisy beam
+        Y[t] = noisy_beams[:, t:t + T].T      # (T, 4) noisy history
+        Z[t] = gt_dvl[:, t + T]               # clean GT at t+T
     return X, Y, Z
 
 # %% Metrics helpers (same as BeamsNet original)
@@ -161,7 +162,7 @@ results = []
 
 with torch.no_grad():
     for i in range(N_TRAJ):
-        X, Y_win, Z = make_windows(beams_list[i], gt_dvl_list[i])
+        X, Y_win, Z = make_windows(noisy_beams_list[i], gt_dvl_list[i])
 
         X_t = torch.from_numpy(X).to(device)         # (M, 4)
         Y_t = torch.from_numpy(Y_win).to(device)     # (M, T, 4)
@@ -191,8 +192,8 @@ for r in results:
         "LS RMSE":     rmse(gt, ls),
         "BN MAE":      mae(gt, bn),
         "LS MAE":      mae(gt, ls),
-        "BN NSE":      nse(gt, bn),
-        "LS NSE":      nse(gt, ls),
+        "BN R2":       nse(gt, bn),
+        "LS R2":       nse(gt, ls),
         "BN VAF":      vaf(gt, bn),
         "LS VAF":      vaf(gt, ls),
     })
@@ -206,11 +207,16 @@ all_gt = np.concatenate([r["gt"]       for r in results], axis=0)
 all_bn = np.concatenate([r["beamsnet"] for r in results], axis=0)
 all_ls = np.concatenate([r["ls"]       for r in results], axis=0)
 
+overall_bn_rmse = rmse(all_gt, all_bn)
+overall_ls_rmse = rmse(all_gt, all_ls)
+improvement = (overall_ls_rmse - overall_bn_rmse) / overall_ls_rmse * 100
+
 print("\nOverall:")
-print(f"  BeamsNetV2 RMSE={rmse(all_gt, all_bn):.4f}  MAE={mae(all_gt, all_bn):.4f}  "
-      f"NSE={nse(all_gt, all_bn):.4f}  VAF={vaf(all_gt, all_bn):.2f}%")
-print(f"  LS         RMSE={rmse(all_gt, all_ls):.4f}  MAE={mae(all_gt, all_ls):.4f}  "
-      f"NSE={nse(all_gt, all_ls):.4f}  VAF={vaf(all_gt, all_ls):.2f}%")
+print(f"  BeamsNetV2 RMSE={overall_bn_rmse:.4f}  MAE={mae(all_gt, all_bn):.4f}  "
+      f"R2={nse(all_gt, all_bn):.4f}  VAF={vaf(all_gt, all_bn):.2f}%")
+print(f"  LS         RMSE={overall_ls_rmse:.4f}  MAE={mae(all_gt, all_ls):.4f}  "
+      f"R2={nse(all_gt, all_ls):.4f}  VAF={vaf(all_gt, all_ls):.2f}%")
+print(f"  Improvement (RMSE): {improvement:.2f}%")
 
 # %% Plot — predicted vs GT for each trajectory (speed magnitude)
 
@@ -229,6 +235,49 @@ for i, r in enumerate(results):
     if i == 0:
         ax.legend(loc="upper right", fontsize=8)
 fig.suptitle("BeamsNetV2 vs LS vs GT — speed magnitude (DVL frame) per trajectory", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# %% Plot — RMSE and R² per trajectory (BeamsNet vs LS)
+
+traj_ids  = [r["traj_id"] for r in results]
+bn_rmses  = [rmse(r["gt"], r["beamsnet"]) for r in results]
+ls_rmses  = [rmse(r["gt"], r["ls"])       for r in results]
+
+x     = np.arange(N_TRAJ)
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.bar(x - width / 2, bn_rmses, width, label="BeamsNetV2", color="steelblue", alpha=0.85)
+ax.bar(x + width / 2, ls_rmses, width, label="LS",         color="tomato",    alpha=0.85)
+ax.axhline(np.mean(bn_rmses), color="steelblue", linestyle="--", linewidth=1.2, label=f"BN mean={np.mean(bn_rmses):.4f}")
+ax.axhline(np.mean(ls_rmses), color="tomato",    linestyle="--", linewidth=1.2, label=f"LS mean={np.mean(ls_rmses):.4f}")
+ax.set_xticks(x)
+ax.set_xticklabels([f"T{i}" for i in traj_ids])
+ax.set_ylabel("RMSE [m/s]")
+ax.set_title("BeamsNetV2 vs LS — RMSE per trajectory (DVL frame)")
+ax.legend()
+ax.grid(True, axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# %% Plot — R² per trajectory (BeamsNet vs LS)
+
+bn_r2s = [nse(r["gt"], r["beamsnet"]) for r in results]
+ls_r2s = [nse(r["gt"], r["ls"])       for r in results]
+
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.bar(x - width / 2, bn_r2s, width, label="BeamsNetV2", color="steelblue", alpha=0.85)
+ax.bar(x + width / 2, ls_r2s, width, label="LS",         color="tomato",    alpha=0.85)
+ax.axhline(np.mean(bn_r2s), color="steelblue", linestyle="--", linewidth=1.2, label=f"BN mean={np.mean(bn_r2s):.4f}")
+ax.axhline(np.mean(ls_r2s), color="tomato",    linestyle="--", linewidth=1.2, label=f"LS mean={np.mean(ls_r2s):.4f}")
+ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+ax.set_xticks(x)
+ax.set_xticklabels([f"T{i}" for i in traj_ids])
+ax.set_ylabel("R²")
+ax.set_title("BeamsNetV2 vs LS — R² per trajectory (DVL frame)")
+ax.legend()
+ax.grid(True, axis="y", alpha=0.3)
 plt.tight_layout()
 plt.show()
 

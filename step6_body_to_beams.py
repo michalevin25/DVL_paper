@@ -12,6 +12,12 @@ DATA_PATH      = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
 SAVE_PATH      = "/Users/michal/Desktop/PhD/dvl paper/DATA/AKIT_beams_dataset"
 N_TRAJECTORIES = 13
 
+# Error model parameters (BeamsNet eq. 7)
+SCALE = 0.007    # 0.7% scale factor
+BIAS  = 0.0001   # m/s constant bias per beam
+SIGMA = 0.042    # m/s Gaussian noise std
+
+
 
 
 # %% DVL geometry helpers
@@ -49,6 +55,13 @@ def B_mat(psi_angs_deg=np.array([45, 135, 225, 315]), alpha_deg=20):
 
     H = np.array([h1, h2, h3, h4]).reshape((4, 3))
     return H
+
+def apply_error_model(beams):
+    """
+    Apply DVL error model (eq. 7) to clean beams.
+    beams : (4, N)  →  noisy beams : (4, N)
+    """
+    return beams * (1 + SCALE) + SIGMA * np.random.randn(*beams.shape) + BIAS
 
 def body_to_beams(v_body):
     """
@@ -99,12 +112,15 @@ for i, sig in enumerate(signals):
     beams_list.append(beams.T)          # store as (4, N)
     print(f"  Traj {i+1}: body {sig.shape} → beams {beams_list[-1].shape}")
 
+noisy_beams_list = [apply_error_model(b) for b in beams_list]
+
 # %% Save dataset
 
 np.savez(
     SAVE_PATH,
-    **{f"traj{i+1}_beams": beams_list[i] for i in range(N_TRAJECTORIES)},
-    **{f"traj{i+1}_time":  times[i]      for i in range(N_TRAJECTORIES)},
+    **{f"traj{i+1}_beams":       beams_list[i]       for i in range(N_TRAJECTORIES)},
+    **{f"traj{i+1}_beams_noisy": noisy_beams_list[i] for i in range(N_TRAJECTORIES)},
+    **{f"traj{i+1}_time":        times[i]             for i in range(N_TRAJECTORIES)},
 )
 print(f"Saved to {SAVE_PATH}.npz")
 
@@ -187,9 +203,12 @@ for i in range(N_GEN):
 syn_beams = np.stack(syn_beams_list)  # (65, 4, 400)
 print(f"Beam dataset shape: {syn_beams.shape}")
 
+syn_beams_noisy = np.stack([apply_error_model(b) for b in syn_beams_list])  # (65, 4, 400)
+
 np.savez(
     SYNTHETIC_SAVE,
-    beams    = syn_beams,    # (65, 4, 400)
+    beams       = syn_beams,        # (65, 4, 400) clean
+    beams_noisy = syn_beams_noisy,  # (65, 4, 400) with error model applied
     means    = gen_means,
     stds     = gen_stds,
     traj_ids = gen_ids,
