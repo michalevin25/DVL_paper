@@ -1,9 +1,9 @@
 # %% [markdown]
 # # Generate Synthetic DVL Dataset
-# 13 trajectories × N_SEEDS signals × 400 samples, with mixed conditions.
+# 13 trajectories × N_SEEDS signals × 206 samples, with mixed conditions.
 # Stats (mean, std, kurtosis) are taken from different real trajectories and
 # combined to create diverse but physically plausible synthetic trajectories.
-# Generates at signal_length=400 to match real trajectory length for BeamsNet.
+# Generates at signal_length=206 to match training length.
 
 # %% Imports & setup
 import torch
@@ -17,7 +17,7 @@ from step3_train import EDMModel, SIGMA_MIN, SIGMA_MAX
 %matplotlib inline
 
 PEAK_SIGMA    = 10     # must match step1
-SIGNAL_LENGTH = 400    # full trajectory length (matches real DVL trajectories)
+SIGNAL_LENGTH = 206    # matches training length
 N_SEEDS       = 5      # signals generated per trajectory (different seeds)
 TRAIN_LENGTH  = 206    # length model was trained on — used to scale peak_times
 
@@ -174,7 +174,7 @@ for traj in TRAJECTORIES:
         sig_norm    = (sig_np - actual_mean[:, None]) / actual_std[:, None]
         actual_kurt = compute_kurtosis(sig_norm, axis=1, fisher=True)  # (3,)
 
-        all_signals.append(sig_norm)
+        all_signals.append(sig_np)
         all_peak_maps.append(pm_np)
         all_means.append(actual_mean)
         all_stds.append(actual_std)
@@ -186,7 +186,7 @@ for traj in TRAJECTORIES:
 out_path = f"{OUT_DIR}/synthetic_dataset"
 np.savez(
     out_path,
-    signals   = np.stack(all_signals),    # (65, 3, 400)
+    signals   = np.stack(all_signals),    # (65, 3, 400) — denormalized m/s
     peak_maps = np.stack(all_peak_maps),  # (65, 3, 400)
     means     = np.stack(all_means),      # (65, 3)
     stds      = np.stack(all_stds),       # (65, 3)
@@ -214,7 +214,7 @@ for row, traj in enumerate(TRAJECTORIES):
             axes[row, col].set_title(vel_labels[col], fontsize=10)
         if col == 0:
             axes[row, col].set_ylabel(f"T{traj['id']}", fontsize=8, rotation=0, labelpad=25)
-fig.suptitle("Synthetic dataset — one window per trajectory (normalized signals)", fontsize=12)
+fig.suptitle("Synthetic dataset — one window per trajectory (m/s)", fontsize=12)
 plt.tight_layout()
 plt.show()
 
@@ -235,16 +235,12 @@ plt.tight_layout()
 plt.show()
 
 
-# %% Visualize — denormalized velocities (actual m/s) for all 13 trajectories
-gen_means = data_gen["means"]   # (52, 3)
-gen_stds  = data_gen["stds"]    # (52, 3)
-
+# %% Visualize — velocities (m/s) for all 13 trajectories
 fig, axes = plt.subplots(13, 3, figsize=(18, 30), sharex=True)
 traj_colors = plt.cm.tab20(np.linspace(0, 1, 13))
 for row, traj in enumerate(TRAJECTORIES):
     idx  = np.where(gen_ids == traj["id"])[0][0]
-    sig  = gen_sigs[idx]                                          # (3, 206) normalized
-    vel  = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]  # (3, 206) m/s
+    vel  = gen_sigs[idx]                                           # (3, 400) m/s
     for col in range(3):
         axes[row, col].plot(vel[col], linewidth=0.8, color=traj_colors[row])
         axes[row, col].grid(True, alpha=0.3)
@@ -253,7 +249,7 @@ for row, traj in enumerate(TRAJECTORIES):
         if col == 0:
             axes[row, col].set_ylabel(f"T{traj['id']}\n{traj['desc'][:18]}",
                                       fontsize=7, rotation=0, labelpad=70)
-fig.suptitle("Synthetic dataset — denormalized velocities (m/s)", fontsize=12)
+fig.suptitle("Synthetic dataset — velocities (m/s)", fontsize=12)
 plt.tight_layout()
 plt.show()
 
@@ -264,8 +260,7 @@ ax3d = fig.add_subplot(111, projection="3d")
 dt = 1.0
 for row, traj in enumerate(TRAJECTORIES):
     idx = np.where(gen_ids == traj["id"])[0][0]
-    sig = gen_sigs[idx]
-    vel = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]
+    vel = gen_sigs[idx]                          # (3, 400) m/s
     x = np.cumsum(vel[0] * dt)
     y = np.cumsum(vel[1] * dt)
     z = np.cumsum(vel[2] * dt)
@@ -282,8 +277,7 @@ plt.show()
 fig = plt.figure(figsize=(20, 16))
 for row, traj in enumerate(TRAJECTORIES):
     idx = np.where(gen_ids == traj["id"])[0][0]
-    sig = gen_sigs[idx]
-    vel = sig * gen_stds[idx, :, None] + gen_means[idx, :, None]
+    vel = gen_sigs[idx]                          # (3, 400) m/s
     x = np.cumsum(vel[0] * dt)
     y = np.cumsum(vel[1] * dt)
     z = np.cumsum(vel[2] * dt)
