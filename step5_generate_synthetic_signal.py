@@ -85,7 +85,17 @@ def generate(peak_map, mean, std, kurtosis, signal_length=SIGNAL_LENGTH,
 
             x = x_next
 
-    return x.squeeze(0)  # (3, N) — model trained on raw m/s, output is m/s directly
+    result = x.squeeze(0)  # (3, N) — raw m/s from model
+
+    # Model learns the right shape but doesn't reliably control amplitude or offset.
+    # Rescale to enforce exact target mean and std while preserving temporal structure.
+    actual_mean = result.mean(dim=1, keepdim=True)
+    actual_std  = result.std(dim=1, keepdim=True).clamp(1e-8)
+    target_mean = mean.squeeze(0).unsqueeze(1)   # (3, 1)
+    target_std  = std.squeeze(0).unsqueeze(1)    # (3, 1)
+    result = (result - actual_mean) / actual_std * target_std + target_mean
+
+    return result  # (3, N) — m/s, exact target mean and std
 
 
 def make_peak_map(peak_times, amplitudes, signal_length=SIGNAL_LENGTH, sigma=PEAK_SIGMA):
