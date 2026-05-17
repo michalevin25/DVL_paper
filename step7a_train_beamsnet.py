@@ -1,7 +1,8 @@
 # %% [markdown]
 # # Step 7a — Train BeamsNetV2 on A-KIT, Leave-2-Out Evaluation
-# Trains on A-KIT only. For each TEST_CONFIG, holds out 2 trajectories for testing
-# and trains on the remaining 11. Reports per-config and summary improvement.
+# Two runs per config:
+#   Baseline  — train on A-KIT only (11 trajs), test on held-out 2
+#   Augmented — train on A-KIT + synthetic (excluding traj_ids matching test set)
 
 # %% Imports & paths
 import torch
@@ -128,6 +129,22 @@ for i in range(N_TRAJ):
     X, Y, Z = make_windows(data_beams[f"traj{i+1}_beams_noisy"], gt_body)
     akit_windows.append({"traj_id": i + 1, "X": X, "Y": Y, "Z": Z})
 
+# %% Load synthetic data once
+
+syn_data     = np.load(SYN_BEAMS_PATH)
+syn_gt       = np.load(SYN_GT_PATH)
+_syn_beams   = syn_data["beams_noisy"]   # (65, 4, N)
+_syn_signals = syn_gt["signals"]         # (65, 3, N)
+_syn_ids     = syn_gt["traj_ids"]        # (65,)
+
+syn_windows = []
+for i in range(len(_syn_beams)):
+    X, Y, Z = make_windows(_syn_beams[i], _syn_signals[i])
+    syn_windows.append({"traj_id": int(_syn_ids[i]), "X": X, "Y": Y, "Z": Z})
+
+print(f"Synthetic windows loaded: {len(syn_windows)} signals, "
+      f"{sum(len(d['X']) for d in syn_windows):,} total windows")
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def make_loader(X, Y, Z, shuffle=True):
@@ -136,21 +153,38 @@ def make_loader(X, Y, Z, shuffle=True):
     )
     return torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=shuffle)
 
-def train_and_eval(test_traj_ids):
-    """Train on A-KIT minus test_traj_ids, evaluate on test_traj_ids."""
+def train_and_eval(test_traj_ids, aug_windows=None):
+    """
+    Train on A-KIT minus test_traj_ids (+ optional aug_windows), evaluate on test_traj_ids.
+    Validation is always pure A-KIT so val loss is comparable across runs.
+    """
     test_set  = [d for d in akit_windows if d["traj_id"] in test_traj_ids]
     train_set = [d for d in akit_windows if d["traj_id"] not in test_traj_ids]
 
-    train_X = np.concatenate([d["X"] for d in train_set])
-    train_Y = np.concatenate([d["Y"] for d in train_set])
-    train_Z = np.concatenate([d["Z"] for d in train_set])
+    akit_X = np.concatenate([d["X"] for d in train_set])
+    akit_Y = np.concatenate([d["Y"] for d in train_set])
+    akit_Z = np.concatenate([d["Z"] for d in train_set])
 
-    N_all   = len(train_X)
+    N_all   = len(akit_X)
     N_val   = N_all // 4
     N_train = N_all - N_val
 
-    train_loader = make_loader(train_X[:N_train], train_Y[:N_train], train_Z[:N_train], shuffle=True)
-    val_loader   = make_loader(train_X[N_train:], train_Y[N_train:], train_Z[N_train:], shuffle=False)
+    # Val always comes from A-KIT only
+    val_X, val_Y, val_Z = akit_X[N_train:], akit_Y[N_train:], akit_Z[N_train:]
+
+    # Training: A-KIT train split + optional synthetic augmentation
+    if aug_windows:
+        aug_X = np.concatenate([d["X"] for d in aug_windows])
+        aug_Y = np.concatenate([d["Y"] for d in aug_windows])
+        aug_Z = np.concatenate([d["Z"] for d in aug_windows])
+        train_X = np.concatenate([akit_X[:N_train], aug_X])
+        train_Y = np.concatenate([akit_Y[:N_train], aug_Y])
+        train_Z = np.concatenate([akit_Z[:N_train], aug_Z])
+    else:
+        train_X, train_Y, train_Z = akit_X[:N_train], akit_Y[:N_train], akit_Z[:N_train]
+
+    train_loader = make_loader(train_X, train_Y, train_Z, shuffle=True)
+    val_loader   = make_loader(val_X,   val_Y,   val_Z,   shuffle=False)
 
     model = BeamsNetV2().to(device)
     model.initialize_weights()
@@ -191,44 +225,64 @@ def train_and_eval(test_traj_ids):
                             "beamsnet": pred_bn, "ls": pred_ls})
     return results
 
-# %% Run leave-2-out for each config
+# %% Run leave-2-out — baseline vs augmented
 
 summary_rows = []
 
 for test_pair in TEST_CONFIGS:
     test_ids = set(test_pair)
-    print(f"\n{'='*50}")
-    print(f"Test trajs: {sorted(test_ids)}  |  Train trajs: {sorted(set(range(1, N_TRAJ+1)) - test_ids)}")
+    aug      = [d for d in syn_windows if d["traj_id"] not in test_ids]
 
-    results = train_and_eval(test_ids)
+    print(f"\n{'='*60}")
+    print(f"Test trajs : {sorted(test_ids)}")
+    print(f"Train trajs: {sorted(set(range(1, N_TRAJ+1)) - test_ids)}")
+    print(f"Synthetic  : {len(aug)} signals ({sum(len(d['X']) for d in aug):,} windows) "
+          f"[traj_ids {sorted(test_ids)} excluded]")
 
-    all_gt = np.concatenate([r["gt"]       for r in results])
-    all_bn = np.concatenate([r["beamsnet"] for r in results])
-    all_ls = np.concatenate([r["ls"]       for r in results])
+    # ── Baseline: A-KIT only ──────────────────────────────────────
+    print("\n  [Baseline — A-KIT only]")
+    results_base = train_and_eval(test_ids, aug_windows=None)
+    gt_b  = np.concatenate([r["gt"]       for r in results_base])
+    bn_b  = np.concatenate([r["beamsnet"] for r in results_base])
+    ls_b  = np.concatenate([r["ls"]       for r in results_base])
+    rmse_bn_base = rmse(gt_b, bn_b)
+    rmse_ls_base = rmse(gt_b, ls_b)
+    improv_base  = (rmse_ls_base - rmse_bn_base) / rmse_ls_base * 100
+    for r in results_base:
+        print(f"    Traj {r['traj_id']}: BN={rmse(r['gt'], r['beamsnet']):.4f}  LS={rmse(r['gt'], r['ls']):.4f}")
+    print(f"    → Improvement: {improv_base:.2f}%")
 
-    overall_bn   = rmse(all_gt, all_bn)
-    overall_ls   = rmse(all_gt, all_ls)
-    improvement  = (overall_ls - overall_bn) / overall_ls * 100
+    # ── Augmented: A-KIT + synthetic ─────────────────────────────
+    print("\n  [Augmented — A-KIT + synthetic]")
+    results_aug = train_and_eval(test_ids, aug_windows=aug)
+    gt_a  = np.concatenate([r["gt"]       for r in results_aug])
+    bn_a  = np.concatenate([r["beamsnet"] for r in results_aug])
+    ls_a  = np.concatenate([r["ls"]       for r in results_aug])
+    rmse_bn_aug = rmse(gt_a, bn_a)
+    rmse_ls_aug = rmse(gt_a, ls_a)
+    improv_aug  = (rmse_ls_aug - rmse_bn_aug) / rmse_ls_aug * 100
+    for r in results_aug:
+        print(f"    Traj {r['traj_id']}: BN={rmse(r['gt'], r['beamsnet']):.4f}  LS={rmse(r['gt'], r['ls']):.4f}")
+    print(f"    → Improvement: {improv_aug:.2f}%")
 
-    for r in results:
-        print(f"  Traj {r['traj_id']}: BN RMSE={rmse(r['gt'], r['beamsnet']):.4f}  "
-              f"LS RMSE={rmse(r['gt'], r['ls']):.4f}")
-    print(f"  → Overall improvement: {improvement:.2f}%")
+    delta = improv_aug - improv_base
+    print(f"\n  Δ improvement from augmentation: {delta:+.2f}pp")
 
     summary_rows.append({
-        "Test trajs":  str(sorted(test_ids)),
-        "BN RMSE":     round(overall_bn,  4),
-        "LS RMSE":     round(overall_ls,  4),
-        "Improvement": round(improvement, 2),
+        "Test trajs":       str(sorted(test_ids)),
+        "LS RMSE":          round(rmse_ls_base, 4),
+        "BN RMSE (base)":   round(rmse_bn_base, 4),
+        "Improv base (%)":  round(improv_base,  2),
+        "BN RMSE (aug)":    round(rmse_bn_aug,  4),
+        "Improv aug (%)":   round(improv_aug,   2),
+        "Δ (pp)":           round(delta,        2),
     })
 
-# %% Summary across all configs
+# %% Summary
 
-print(f"\n{'='*50}")
+print(f"\n{'='*60}")
 print("Summary:")
 print(pd.DataFrame(summary_rows).to_string(index=False))
-mean_improv = np.mean([r["Improvement"] for r in summary_rows])
-print(f"\nMean improvement across configs: {mean_improv:.2f}%")
 
 # ============================================================
 # %% [markdown]
@@ -284,23 +338,18 @@ print(f"Done. Best val loss: {best_val:.6f}")
 
 # %% Run on all synthetic signals
 
-syn_data        = np.load(SYN_BEAMS_PATH)
-syn_gt          = np.load(SYN_GT_PATH)
-syn_beams_noisy = syn_data["beams_noisy"]   # (65, 4, N)
-syn_signals     = syn_gt["signals"]         # (65, 3, N)
-syn_traj_ids    = syn_gt["traj_ids"]        # (65,)
-N_SYN           = len(syn_beams_noisy)
+N_SYN = len(syn_windows)
 
 syn_results = []
 with torch.no_grad():
-    for i in range(N_SYN):
-        X, Y, Z = make_windows(syn_beams_noisy[i], syn_signals[i])
+    for i, d in enumerate(syn_windows):
+        X, Y, Z = d["X"], d["Y"], d["Z"]
         pred_bn = diag_model(torch.from_numpy(X).to(device),
                              torch.from_numpy(Y).to(device)).cpu().numpy()
         pred_ls = (P_INV @ X.T).T
         syn_results.append({
             "signal_idx": i,
-            "traj_id":    int(syn_traj_ids[i]),
+            "traj_id":    d["traj_id"],
             "gt": Z, "beamsnet": pred_bn, "ls": pred_ls,
         })
 
