@@ -31,7 +31,13 @@ class DVLDataset(Dataset):
 
 SIGMA_MIN  = 0.002
 SIGMA_MAX  = 80.0
-SIGMA_DATA = 1.0  # signals are normalized to unit variance per window
+
+# SIGMA_DATA is the typical signal amplitude in the training data.
+# Now that training signals are raw m/s (not z-scored), compute from the dataset.
+_ds_tmp    = np.load(DATASET_PATH)
+SIGMA_DATA = float(np.sqrt(np.mean(_ds_tmp["stds"] ** 2)))  # RMS of per-window stds
+del _ds_tmp
+print(f"SIGMA_DATA = {SIGMA_DATA:.4f}  (RMS per-window std from training data)")
 
 
 def c_skip(sigma):

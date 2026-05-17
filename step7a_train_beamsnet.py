@@ -1,10 +1,7 @@
 # %% [markdown]
-# # Step 7a — Train BeamsNetV2 on A-KIT Data
-# Retrains BeamsNetV2 on A-KIT beam measurements (step6 output) instead of
-# the original Snapir data. Follows the original BeamsNet training pipeline:
-# same architecture, same noise model already applied in step6, same 75/25
-# train/val split (applied to the concatenated training trajectories).
-# Held-out test trajectories are evaluated per-trajectory and overall.
+# # Step 7a — Train BeamsNetV2 on A-KIT, Leave-2-Out Evaluation
+# Trains on A-KIT only. For each TEST_CONFIG, holds out 2 trajectories for testing
+# and trains on the remaining 11. Reports per-config and summary improvement.
 
 # %% Imports & paths
 import torch
@@ -19,17 +16,21 @@ from numpy import linalg as LA
 torch.manual_seed(0)
 np.random.seed(0)
 
-BEAMS_PATH = "/Users/michal/Desktop/PhD/dvl paper/DATA/AKIT_beams_dataset.npz"
-DATA_PATH  = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
-SAVE_PATH  = "/Users/michal/Desktop/PhD/dvl paper/BeamsNetV2_AKIT.pkl"
+BEAMS_PATH     = "/Users/michal/Desktop/PhD/dvl paper/DATA/AKIT_beams_dataset.npz"
+DATA_PATH      = "/Users/michal/Desktop/PhD/dvl paper/A-KIT-main/Data"
+SYN_BEAMS_PATH = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA/synthetic_beams_dataset.npz"
+SYN_GT_PATH    = "/Users/michal/Desktop/PhD/dvl paper/GENERATED DATA/synthetic_dataset.npz"
+SAVE_PATH      = "/Users/michal/Desktop/PhD/dvl paper/BeamsNetV2_AKIT.pkl"
 
-N_TRAJ      = 13
-SKIP_TRAJS  = {12}
-TRAIN_TRAJS = set(range(1, 12))   # trajectories 1–11
-TEST_TRAJS  = {13}                # trajectory 13 held out
+N_TRAJ = 13
 
-T          = 3      # DVL history window — must match architecture
-BATCH_SIZE = 32
+# Each entry is a pair of trajectory IDs held out for testing
+TEST_CONFIGS = [
+    (1, 13),
+]
+
+T          = 3
+BATCH_SIZE = 4
 EPOCHS     = 150
 LR         = 1e-3
 
@@ -116,204 +117,276 @@ def make_windows(beams_noisy, gt_body):
         Z[t] = gt_body[:, t + T]
     return X, Y, Z
 
-# %% Load beam data and GT velocities
+# %% Load all A-KIT data once
 
-data_beams = np.load(BEAMS_PATH)
-
-noisy_beams_list = []
-gt_body_list     = []
-
+data_beams   = np.load(BEAMS_PATH)
+akit_windows = []
 for i in range(N_TRAJ):
-    noisy_beams_list.append(data_beams[f"traj{i+1}_beams_noisy"])   # (4, 400)
     csv = pd.read_csv(f"{DATA_PATH}/Trajectory{i+1}/DVL_trajectory{i+1}.csv")
     vx, vy, vz = csv.iloc[:, 1].values, csv.iloc[:, 2].values, csv.iloc[:, 3].values
-    gt_body_list.append(np.stack([vx, vy, vz], axis=0))             # (3, 400)
+    gt_body = np.stack([vx, vy, vz], axis=0)
+    X, Y, Z = make_windows(data_beams[f"traj{i+1}_beams_noisy"], gt_body)
+    akit_windows.append({"traj_id": i + 1, "X": X, "Y": Y, "Z": Z})
 
-print("Loaded trajectories:")
-for i in range(N_TRAJ):
-    tag = " [SKIP]" if (i+1) in SKIP_TRAJS else \
-          " [TEST]"  if (i+1) in TEST_TRAJS  else " [TRAIN]"
-    print(f"  Traj {i+1}: beams {noisy_beams_list[i].shape}  gt {gt_body_list[i].shape}{tag}")
-
-# %% Build windows and form train / test sets
-
-train_X, train_Y, train_Z = [], [], []
-test_data = []   # list of dicts for per-trajectory test eval
-
-for i in range(N_TRAJ):
-    tid = i + 1
-    if tid in SKIP_TRAJS:
-        continue
-    X, Y, Z = make_windows(noisy_beams_list[i], gt_body_list[i])
-    if tid in TEST_TRAJS:
-        test_data.append({"traj_id": tid, "X": X, "Y": Y, "Z": Z})
-    else:
-        train_X.append(X)
-        train_Y.append(Y)
-        train_Z.append(Z)
-
-train_X = np.concatenate(train_X, axis=0)
-train_Y = np.concatenate(train_Y, axis=0)
-train_Z = np.concatenate(train_Z, axis=0)
-
-N_all   = len(train_X)
-N_val   = N_all // 4
-N_train = N_all - N_val
-
-X_tr, X_va = train_X[:N_train], train_X[N_train:]
-Y_tr, Y_va = train_Y[:N_train], train_Y[N_train:]
-Z_tr, Z_va = train_Z[:N_train], train_Z[N_train:]
-
-print(f"\nTrain: {N_train} windows  |  Val: {N_val} windows")
-print(f"Test trajectories: {sorted(TEST_TRAJS)}  ({sum(len(d['Z']) for d in test_data)} windows)")
-
-# %% DataLoaders
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def make_loader(X, Y, Z, shuffle=True):
     ds = torch.utils.data.TensorDataset(
-        torch.from_numpy(X),
-        torch.from_numpy(Y),
-        torch.from_numpy(Z),
+        torch.from_numpy(X), torch.from_numpy(Y), torch.from_numpy(Z),
     )
     return torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=shuffle)
 
-train_loader = make_loader(X_tr, Y_tr, Z_tr, shuffle=True)
-val_loader   = make_loader(X_va, Y_va, Z_va, shuffle=False)
+def train_and_eval(test_traj_ids):
+    """Train on A-KIT minus test_traj_ids, evaluate on test_traj_ids."""
+    test_set  = [d for d in akit_windows if d["traj_id"] in test_traj_ids]
+    train_set = [d for d in akit_windows if d["traj_id"] not in test_traj_ids]
 
-# %% Initialise model
+    train_X = np.concatenate([d["X"] for d in train_set])
+    train_Y = np.concatenate([d["Y"] for d in train_set])
+    train_Z = np.concatenate([d["Z"] for d in train_set])
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model  = BeamsNetV2().to(device)
-model.initialize_weights()
-print(f"Training on {device}")
+    N_all   = len(train_X)
+    N_val   = N_all // 4
+    N_train = N_all - N_val
 
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    train_loader = make_loader(train_X[:N_train], train_Y[:N_train], train_Z[:N_train], shuffle=True)
+    val_loader   = make_loader(train_X[N_train:], train_Y[N_train:], train_Z[N_train:], shuffle=False)
 
-# %% Training loop
+    model = BeamsNetV2().to(device)
+    model.initialize_weights()
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-train_losses, val_losses = [], []
-best_val_loss = float("inf")
+    best_val, best_state = float("inf"), None
+    for epoch in range(1, EPOCHS + 1):
+        model.train()
+        for xb, yb, zb in train_loader:
+            xb, yb, zb = xb.to(device), yb.to(device), zb.to(device)
+            optimizer.zero_grad()
+            criterion(model(xb, yb), zb).backward()
+            optimizer.step()
 
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb, zb in val_loader:
+                xb, yb, zb = xb.to(device), yb.to(device), zb.to(device)
+                val_loss += criterion(model(xb, yb), zb).item() * len(xb)
+        val_loss /= N_val
+        if val_loss < best_val:
+            best_val  = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+    model.load_state_dict(best_state)
+    model.eval()
+
+    results = []
+    with torch.no_grad():
+        for d in test_set:
+            X_t = torch.from_numpy(d["X"]).to(device)
+            Y_t = torch.from_numpy(d["Y"]).to(device)
+            pred_bn = model(X_t, Y_t).cpu().numpy()
+            pred_ls = (P_INV @ d["X"].T).T
+            results.append({"traj_id": d["traj_id"], "gt": d["Z"],
+                            "beamsnet": pred_bn, "ls": pred_ls})
+    return results
+
+# %% Run leave-2-out for each config
+
+summary_rows = []
+
+for test_pair in TEST_CONFIGS:
+    test_ids = set(test_pair)
+    print(f"\n{'='*50}")
+    print(f"Test trajs: {sorted(test_ids)}  |  Train trajs: {sorted(set(range(1, N_TRAJ+1)) - test_ids)}")
+
+    results = train_and_eval(test_ids)
+
+    all_gt = np.concatenate([r["gt"]       for r in results])
+    all_bn = np.concatenate([r["beamsnet"] for r in results])
+    all_ls = np.concatenate([r["ls"]       for r in results])
+
+    overall_bn   = rmse(all_gt, all_bn)
+    overall_ls   = rmse(all_gt, all_ls)
+    improvement  = (overall_ls - overall_bn) / overall_ls * 100
+
+    for r in results:
+        print(f"  Traj {r['traj_id']}: BN RMSE={rmse(r['gt'], r['beamsnet']):.4f}  "
+              f"LS RMSE={rmse(r['gt'], r['ls']):.4f}")
+    print(f"  → Overall improvement: {improvement:.2f}%")
+
+    summary_rows.append({
+        "Test trajs":  str(sorted(test_ids)),
+        "BN RMSE":     round(overall_bn,  4),
+        "LS RMSE":     round(overall_ls,  4),
+        "Improvement": round(improvement, 2),
+    })
+
+# %% Summary across all configs
+
+print(f"\n{'='*50}")
+print("Summary:")
+print(pd.DataFrame(summary_rows).to_string(index=False))
+mean_improv = np.mean([r["Improvement"] for r in summary_rows])
+print(f"\nMean improvement across configs: {mean_improv:.2f}%")
+
+# ============================================================
+# %% [markdown]
+# ## Synthetic data diagnostic
+# Train on ALL A-KIT (13 trajs), test on 65 synthetic signals.
+# Per-signal improvement ranking + per-axis RMSE breakdown
+# reveals which synthetic signals are closest to real A-KIT
+# and which velocity axis drives the domain gap.
+# ============================================================
+
+# %% Train on all A-KIT
+
+print("\nTraining on all A-KIT trajectories for synthetic diagnostic...")
+all_X = np.concatenate([d["X"] for d in akit_windows])
+all_Y = np.concatenate([d["Y"] for d in akit_windows])
+all_Z = np.concatenate([d["Z"] for d in akit_windows])
+
+N_all   = len(all_X)
+N_val   = N_all // 4
+N_train = N_all - N_val
+
+train_loader = make_loader(all_X[:N_train], all_Y[:N_train], all_Z[:N_train], shuffle=True)
+val_loader   = make_loader(all_X[N_train:], all_Y[N_train:], all_Z[N_train:], shuffle=False)
+
+diag_model = BeamsNetV2().to(device)
+diag_model.initialize_weights()
+criterion  = nn.MSELoss()
+optimizer  = torch.optim.Adam(diag_model.parameters(), lr=LR)
+
+best_val, best_state = float("inf"), None
 for epoch in range(1, EPOCHS + 1):
-    model.train()
-    epoch_loss = 0.0
+    diag_model.train()
     for xb, yb, zb in train_loader:
         xb, yb, zb = xb.to(device), yb.to(device), zb.to(device)
         optimizer.zero_grad()
-        loss = criterion(model(xb, yb), zb)
-        loss.backward()
+        criterion(diag_model(xb, yb), zb).backward()
         optimizer.step()
-        epoch_loss += loss.item() * len(xb)
-    train_losses.append(epoch_loss / N_train)
 
-    model.eval()
+    diag_model.eval()
     val_loss = 0.0
     with torch.no_grad():
         for xb, yb, zb in val_loader:
             xb, yb, zb = xb.to(device), yb.to(device), zb.to(device)
-            val_loss += criterion(model(xb, yb), zb).item() * len(xb)
-    val_losses.append(val_loss / N_val)
+            val_loss += criterion(diag_model(xb, yb), zb).item() * len(xb)
+    val_loss /= N_val
+    if val_loss < best_val:
+        best_val   = val_loss
+        best_state = {k: v.clone() for k, v in diag_model.state_dict().items()}
 
-    if val_losses[-1] < best_val_loss:
-        best_val_loss = val_losses[-1]
-        torch.save(model.state_dict(), SAVE_PATH)
-        tag = " *"
-    else:
-        tag = ""
+diag_model.load_state_dict(best_state)
+diag_model.eval()
+print(f"Done. Best val loss: {best_val:.6f}")
 
-    if epoch % 10 == 0 or epoch == 1:
-        print(f"Epoch {epoch:3d}/{EPOCHS}  train={train_losses[-1]:.6f}  val={val_losses[-1]:.6f}{tag}")
+# %% Run on all synthetic signals
 
-print(f"\nBest val loss: {best_val_loss:.6f}  → {SAVE_PATH}")
+syn_data        = np.load(SYN_BEAMS_PATH)
+syn_gt          = np.load(SYN_GT_PATH)
+syn_beams_noisy = syn_data["beams_noisy"]   # (65, 4, N)
+syn_signals     = syn_gt["signals"]         # (65, 3, N)
+syn_traj_ids    = syn_gt["traj_ids"]        # (65,)
+N_SYN           = len(syn_beams_noisy)
 
-# %% Plot training curves
-
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(train_losses, label="Train", linewidth=1.2)
-ax.plot(val_losses,   label="Val",   linewidth=1.2)
-ax.set_xlabel("Epoch")
-ax.set_ylabel("MSE Loss")
-ax.set_title("BeamsNetV2 — Training on A-KIT data")
-ax.legend()
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# %% Load best model and evaluate on test trajectories
-
-model.load_state_dict(torch.load(SAVE_PATH, map_location=device, weights_only=True))
-model.eval()
-
-results = []
+syn_results = []
 with torch.no_grad():
-    for d in test_data:
-        X_t = torch.from_numpy(d["X"]).to(device)
-        Y_t = torch.from_numpy(d["Y"]).to(device)
-        pred_bn = model(X_t, Y_t).cpu().numpy()
-        pred_ls = (P_INV @ d["X"].T).T
-        results.append({
-            "traj_id":  d["traj_id"],
-            "gt":       d["Z"],
-            "beamsnet": pred_bn,
-            "ls":       pred_ls,
+    for i in range(N_SYN):
+        X, Y, Z = make_windows(syn_beams_noisy[i], syn_signals[i])
+        pred_bn = diag_model(torch.from_numpy(X).to(device),
+                             torch.from_numpy(Y).to(device)).cpu().numpy()
+        pred_ls = (P_INV @ X.T).T
+        syn_results.append({
+            "signal_idx": i,
+            "traj_id":    int(syn_traj_ids[i]),
+            "gt": Z, "beamsnet": pred_bn, "ls": pred_ls,
         })
-        print(f"Traj {d['traj_id']}: BN RMSE={rmse(d['Z'], pred_bn):.4f}  "
-              f"LS RMSE={rmse(d['Z'], pred_ls):.4f}")
 
-# %% Summary table
+# %% Per-axis RMSE helper
+
+def rmse_ax(true, pred):
+    """Per-axis RMSE — returns (3,) array for vx, vy, vz."""
+    return np.sqrt(np.mean((true - pred) ** 2, axis=0))
+
+# %% Per-signal improvement table (sorted best → worst)
 
 rows = []
-for r in results:
+for r in syn_results:
     gt, bn, ls = r["gt"], r["beamsnet"], r["ls"]
+    improv = (rmse(gt, ls) - rmse(gt, bn)) / rmse(gt, ls) * 100
+    ax_bn  = rmse_ax(gt, bn)
+    ax_ls  = rmse_ax(gt, ls)
     rows.append({
-        "Traj":    r["traj_id"],
-        "BN RMSE": rmse(gt, bn), "LS RMSE": rmse(gt, ls),
-        "BN MAE":  mae(gt, bn),  "LS MAE":  mae(gt, ls),
-        "BN R²":   nse(gt, bn),  "LS R²":   nse(gt, ls),
-        "BN VAF":  vaf(gt, bn),  "LS VAF":  vaf(gt, ls),
+        "sig":      r["signal_idx"],
+        "traj":     r["traj_id"],
+        "improv":   round(improv, 2),
+        "BN|vx":    round(ax_bn[0], 4),
+        "BN|vy":    round(ax_bn[1], 4),
+        "BN|vz":    round(ax_bn[2], 4),
+        "LS|vx":    round(ax_ls[0], 4),
+        "LS|vy":    round(ax_ls[1], 4),
+        "LS|vz":    round(ax_ls[2], 4),
     })
 
-df = pd.DataFrame(rows).set_index("Traj")
-print("\nPer-trajectory results:")
-print(df.round(4).to_string())
+df_syn = pd.DataFrame(rows).sort_values("improv", ascending=False)
+print("\nPer-signal improvement (best → worst):")
+print(df_syn.to_string(index=False))
 
-all_gt = np.concatenate([r["gt"]       for r in results], axis=0)
-all_bn = np.concatenate([r["beamsnet"] for r in results], axis=0)
-all_ls = np.concatenate([r["ls"]       for r in results], axis=0)
+# %% Per-axis aggregate summary
 
-overall_bn = rmse(all_gt, all_bn)
-overall_ls = rmse(all_gt, all_ls)
-print(f"\nOverall  BN RMSE={overall_bn:.4f}  LS RMSE={overall_ls:.4f}  "
-      f"Improvement={( overall_ls - overall_bn) / overall_ls * 100:.2f}%")
+all_gt = np.concatenate([r["gt"]       for r in syn_results])
+all_bn = np.concatenate([r["beamsnet"] for r in syn_results])
+all_ls = np.concatenate([r["ls"]       for r in syn_results])
 
-# %% Plot — speed magnitude per test trajectory
+ax_bn_all = rmse_ax(all_gt, all_bn)
+ax_ls_all = rmse_ax(all_gt, all_ls)
+ax_improv = (ax_ls_all - ax_bn_all) / ax_ls_all * 100
 
-for r in results:
-    fig, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(LA.norm(r["gt"],       axis=1), label="GT",         linewidth=0.9, color="black")
-    ax.plot(LA.norm(r["beamsnet"], axis=1), label="BeamsNetV2", linewidth=0.8, color="steelblue", alpha=0.8)
-    ax.plot(LA.norm(r["ls"],       axis=1), label="LS",         linewidth=0.8, color="tomato",   alpha=0.8, linestyle="--")
-    ax.set_xlabel("Sample")
-    ax.set_ylabel("Speed [m/s]")
-    ax.set_title(f"Traj {r['traj_id']} — BeamsNetV2 vs LS vs GT (speed magnitude)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+print("\nPer-axis aggregate (all 65 synthetic signals):")
+df_ax = pd.DataFrame({
+    "axis":    ["vx", "vy", "vz"],
+    "BN RMSE": ax_bn_all.round(4),
+    "LS RMSE": ax_ls_all.round(4),
+    "improv %": ax_improv.round(2),
+})
+print(df_ax.to_string(index=False))
 
-# %% Plot — per-axis for first test trajectory
+overall_improv = (rmse(all_gt, all_ls) - rmse(all_gt, all_bn)) / rmse(all_gt, all_ls) * 100
+print(f"\nOverall improvement: {overall_improv:.2f}%")
 
-r = results[0]
-fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-for j, label in enumerate(["vx", "vy", "vz"]):
-    axes[j].plot(r["gt"][:, j],       label="GT",         linewidth=0.9, color="black")
-    axes[j].plot(r["beamsnet"][:, j], label="BeamsNetV2", linewidth=0.8, color="steelblue", alpha=0.8)
-    axes[j].plot(r["ls"][:, j],       label="LS",         linewidth=0.8, color="tomato",   alpha=0.8, linestyle="--")
-    axes[j].set_ylabel(label)
+# %% Plot — per-axis RMSE: BN vs LS across all synthetic signals
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+x = np.arange(N_SYN)
+labels = ["vx", "vy", "vz"]
+for j in range(3):
+    bn_j = [rmse_ax(r["gt"], r["beamsnet"])[j] for r in syn_results]
+    ls_j = [rmse_ax(r["gt"], r["ls"])[j]       for r in syn_results]
+    axes[j].plot(x, bn_j, label="BeamsNetV2", color="steelblue", linewidth=0.9, marker="o", markersize=3)
+    axes[j].plot(x, ls_j, label="LS",         color="tomato",    linewidth=0.9, marker="o", markersize=3)
+    axes[j].set_ylabel(f"RMSE {labels[j]}")
+    axes[j].legend(fontsize=8)
     axes[j].grid(True, alpha=0.3)
-axes[0].legend(loc="upper right", fontsize=9)
-axes[0].set_title(f"Traj {r['traj_id']} — per-axis predictions")
-axes[2].set_xlabel("Sample")
+axes[0].set_title("Per-axis RMSE across 65 synthetic signals (A-KIT-trained model)")
+axes[2].set_xlabel("Signal index (sorted by traj ID)")
 plt.tight_layout()
 plt.show()
+
+# %% Plot — improvement distribution
+
+improvs = df_syn["improv"].values
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.bar(np.arange(N_SYN), df_syn["improv"].values, color=["steelblue" if v > 0 else "tomato" for v in improvs], alpha=0.8)
+ax.axhline(0, color="black", linewidth=0.8)
+ax.axhline(overall_improv, color="navy", linewidth=1.2, linestyle="--", label=f"mean={overall_improv:.1f}%")
+ax.set_xlabel("Signal (sorted best → worst)")
+ax.set_ylabel("Improvement over LS (%)")
+ax.set_title("Per-signal improvement — A-KIT model on synthetic data")
+ax.legend()
+ax.grid(True, axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# %%
