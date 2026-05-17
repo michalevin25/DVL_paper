@@ -104,9 +104,9 @@ def create_windows(signals, curvatures):
             w_peak_map = compute_peak_map(w_curv)                       # (3, WINDOW_SIZE)
             w_mean     = w_sig.mean(axis=1)                             # (3,)
             w_std      = w_sig.std(axis=1).clip(1e-8)                   # (3,)
-            w_sig_norm = (w_sig - w_mean[:, None]) / w_std[:, None]     # (3, WINDOW_SIZE)
+            w_sig_norm = (w_sig - w_mean[:, None]) / w_std[:, None]     # (3, WINDOW_SIZE) — only for kurtosis
             w_kurt     = compute_kurtosis(w_sig_norm, axis=1, fisher=True)  # (3,)
-            win_signals.append(w_sig_norm)
+            win_signals.append(w_sig)                                    # raw m/s — not z-scored
             win_peak_maps.append(w_peak_map)
             win_means.append(w_mean)
             win_stds.append(w_std)
@@ -145,14 +145,8 @@ def build_pipeline(batch_size=4, save_path=None):
     print("Computing curvature maps...")
     curvatures = [compute_curvature(s, t) for s, t in zip(signals, times)]
 
-    print("Computing per-trajectory stats...")
-    means, stds = zip(*[compute_stats(s) for s in signals])
-
-    print("Normalizing signals...")
-    signals_norm = [normalize(s, m, sd) for s, m, sd in zip(signals, means, stds)]
-
     print("Creating windows...")
-    win_signals, win_peak_maps, win_means, win_stds, win_kurtoses, win_traj_ids = create_windows(signals_norm, curvatures)
+    win_signals, win_peak_maps, win_means, win_stds, win_kurtoses, win_traj_ids = create_windows(signals, curvatures)
     print(f"  {len(win_signals)} windows (window={WINDOW_SIZE}, stride={STRIDE}, K={K_PEAKS} peaks, sigma={PEAK_SIGMA})")
 
     if save_path is not None:

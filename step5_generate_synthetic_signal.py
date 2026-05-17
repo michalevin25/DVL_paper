@@ -8,6 +8,7 @@
 # %% Imports & setup
 import torch
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import os
@@ -42,8 +43,8 @@ def generate(peak_map, mean, std, kurtosis, signal_length=SIGNAL_LENGTH,
              n_steps=200, seed=None, cfg_scale=1.0):
     """
     peak_map : (1, 3, signal_length)
-    mean/std/kurtosis : (1, 3)
-    returns  : (3, signal_length) — denormalized velocity signal
+    mean/std/kurtosis : (1, 3)  — conditions passed to the model; model outputs m/s directly
+    returns  : (3, signal_length) — velocity signal in m/s
     """
     if seed is not None:
         torch.manual_seed(seed)
@@ -84,9 +85,7 @@ def generate(peak_map, mean, std, kurtosis, signal_length=SIGNAL_LENGTH,
 
             x = x_next
 
-    result = x.squeeze(0)  # (3, N) — normalized space
-    result = result * std.squeeze(0).unsqueeze(1) + mean.squeeze(0).unsqueeze(1)
-    return result  # (3, N) — denormalized
+    return x.squeeze(0)  # (3, N) — model trained on raw m/s, output is m/s directly
 
 
 def make_peak_map(peak_times, amplitudes, signal_length=SIGNAL_LENGTH, sigma=PEAK_SIGMA):
@@ -292,6 +291,83 @@ fig.suptitle("Synthetic dataset — 3D trajectories (one window per trajectory)"
 plt.tight_layout()
 plt.show()
 
+
+# %% Condition fidelity check
+# Compare what we ASKED for (conditioned mean/std/kurt) vs what the model GENERATED.
+# Perfect fidelity = all points on the diagonal.
+# Off-diagonal = model ignoring the condition for that axis/trajectory.
+
+data_fid   = np.load(f"{OUT_DIR}/synthetic_dataset.npz")
+actual_means = data_fid["means"]     # (65, 3) — recomputed from generated signal
+actual_stds  = data_fid["stds"]      # (65, 3)
+actual_kurts = data_fid["kurtoses"]  # (65, 3)
+fid_ids      = data_fid["traj_ids"]  # (65,)
+
+# Build target (conditioned) arrays aligned to the 65 signals
+target_means = np.array([traj["mean"] for traj in TRAJECTORIES for _ in range(N_SEEDS)])  # (65, 3)
+target_stds  = np.array([traj["std"]  for traj in TRAJECTORIES for _ in range(N_SEEDS)])  # (65, 3)
+target_kurts = np.array([traj["kurt"] for traj in TRAJECTORIES for _ in range(N_SEEDS)])  # (65, 3)
+
+ax_labels = ["vx", "vy", "vz"]
+
+# Scatter: conditioned vs actual for mean, std, kurtosis
+fig, axes = plt.subplots(3, 3, figsize=(14, 12))
+for col, (tgt, act, stat_name) in enumerate([
+    (target_means, actual_means, "mean"),
+    (target_stds,  actual_stds,  "std"),
+    (target_kurts, actual_kurts, "kurtosis"),
+]):
+    for row in range(3):
+        ax  = axes[row, col]
+        x   = tgt[:, row]
+        y   = act[:, row]
+        err = np.abs(y - x)
+        sc  = ax.scatter(x, y, c=err, cmap="RdYlGn_r", vmin=0, vmax=err.max(), s=30, alpha=0.8)
+        lo  = min(x.min(), y.min()) - 0.05
+        hi  = max(x.max(), y.max()) + 0.05
+        ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, alpha=0.5)
+        ax.set_xlabel(f"conditioned {stat_name} ({ax_labels[row]})")
+        ax.set_ylabel(f"actual {stat_name} ({ax_labels[row]})")
+        mae = np.mean(err)
+        ax.set_title(f"{stat_name} — {ax_labels[row]}  (MAE={mae:.3f})", fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.colorbar(sc, ax=ax, label="|error|")
+
+fig.suptitle("Condition fidelity: conditioned vs actual generated stats\n(on diagonal = model follows condition)", fontsize=11)
+plt.tight_layout()
+plt.show()
+
+# Per-trajectory fidelity table
+print("\nPer-trajectory condition fidelity (mean absolute error across seeds):")
+fid_rows = []
+for traj in TRAJECTORIES:
+    mask = fid_ids == traj["id"]
+    for ax_i, ax_lbl in enumerate(ax_labels):
+        err_mean = np.abs(actual_means[mask, ax_i] - traj["mean"][ax_i]).mean()
+        err_std  = np.abs(actual_stds[mask,  ax_i] - traj["std"][ax_i]).mean()
+        err_kurt = np.abs(actual_kurts[mask, ax_i] - traj["kurt"][ax_i]).mean()
+        fid_rows.append({
+            "traj": traj["id"], "axis": ax_lbl,
+            "MAE mean": round(err_mean, 4),
+            "MAE std":  round(err_std,  4),
+            "MAE kurt": round(err_kurt, 4),
+        })
+
+df_fid = pd.DataFrame(fid_rows)
+print(df_fid.to_string(index=False))
+
+# Bar chart: mean MAE per trajectory (averaged across axes)
+traj_mae = df_fid.groupby("traj")[["MAE mean", "MAE std", "MAE kurt"]].mean()
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for col, stat in enumerate(["MAE mean", "MAE std", "MAE kurt"]):
+    axes[col].bar(traj_mae.index, traj_mae[stat], color="steelblue", alpha=0.8)
+    axes[col].set_xlabel("Trajectory ID")
+    axes[col].set_ylabel("MAE")
+    axes[col].set_title(f"Condition fidelity — {stat} (avg across axes)")
+    axes[col].grid(True, axis="y", alpha=0.3)
+plt.suptitle("Condition fidelity per trajectory — lower = model follows condition better", fontsize=10)
+plt.tight_layout()
+plt.show()
 
 # %% Diversity check — 5 seeds per trajectory for traj 5 and 11
 fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex=True)
